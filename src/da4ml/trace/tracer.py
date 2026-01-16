@@ -47,8 +47,6 @@ def gather_variables(inputs: Sequence[FixedVariable], outputs: Sequence[FixedVar
 
 def _comb_trace(inputs: Sequence[FixedVariable], outputs: Sequence[FixedVariable]):
     variables, index = gather_variables(inputs, outputs)
-    print(f"Variables: {variables}")
-    print(f"Variables 2nd way: {[v.id for v in variables]}")
     ops: list[Op] = []
     inp_uuids = {v.id: i for i, v in enumerate(inputs)}
     lookup_tables = []
