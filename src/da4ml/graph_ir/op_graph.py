@@ -30,7 +30,8 @@ class TensorEdge:
 class OpGraph:
     ops: dict[int, OpNode]
     tensors: dict[int, TensorEdge]
-
+    model_input_tids: list[int] = field(default_factory=list)
+    model_output_tids: list[int] = field(default_factory=list)
 
 def parse_model(model: keras.Model):
     if isinstance(model, keras.Sequential):
@@ -52,7 +53,16 @@ def parse_model(model: keras.Model):
     return [operators[i] for i in range(max(operators.keys()), -1, -1)]
 
 def build_graph_from_model(model : keras.Model) -> OpGraph:
-    return build_graph(parsed_model=parse_model(model))
+    if isinstance(model, keras.Sequential):
+        model = model._functional
+
+    g = build_graph(parsed_model=parse_model(model))
+
+    # True graph ports from the model object (not inferred)
+    g.model_input_tids = [id(t) for t in model.inputs]
+    g.model_output_tids = [id(t) for t in model.outputs]
+
+    return g
 
 def build_graph(parsed_model: list[list[Any]]) -> OpGraph:
     """
@@ -100,9 +110,13 @@ def build_graph(parsed_model: list[list[Any]]) -> OpGraph:
     return g
 
 def input_tensors(g: OpGraph) -> list[int]:
+    if g.model_input_tids:
+        return list(g.model_input_tids)
     return [tid for tid, e in g.tensors.items() if e.producer is None and e.consumers]
 
 def output_tensors(g: OpGraph) -> list[int]:
+    if g.model_output_tids:
+        return list(g.model_output_tids)
     return [tid for tid, e in g.tensors.items() if e.producer is not None and not e.consumers]
 
 

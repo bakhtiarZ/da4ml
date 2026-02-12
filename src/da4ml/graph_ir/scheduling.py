@@ -8,7 +8,7 @@ from hgq.layers import QDense
 @dataclass
 class DataSchedule():
     shape_req: Callable[[tuple], bool]
-    output_shape: Callable[[tuple], tuple]
+    minimum_output_shape: Callable[[tuple], tuple]
     minimum_input_shape: Callable[[tuple], tuple]
     schedule : Callable 
     rebuilder:  Callable
@@ -48,8 +48,8 @@ def input_dense_schedule_requirement(shape: tuple) -> bool:
     met = len(shape) >= 1 and shape[-1] > 0
     return met
 
-def output_shape_for_dense(input_shape: tuple) -> tuple:
-    return input_shape[:-1] + (1,) #? not me...
+def minimum_output_shape_for_dense(output_shape: tuple) -> tuple:
+    return (output_shape[-1],)
 
 def minimum_input_shape_for_dense(input_shape: tuple) -> tuple:
     return (input_shape[-1],)
@@ -63,8 +63,8 @@ def dense_rebuilder(x: list[keras.KerasTensor], original_shape: tuple) -> keras.
 
 
 _SCHEDULE_REGISTRY : dict[type, DataSchedule] = {
-    keras.layers.Dense : DataSchedule(shape_req=input_dense_schedule_requirement, output_shape=output_shape_for_dense, minimum_input_shape=minimum_input_shape_for_dense, schedule=dense_schedule, rebuilder=dense_rebuilder),
+    keras.layers.Dense : DataSchedule(shape_req=input_dense_schedule_requirement, minimum_output_shape=minimum_output_shape_for_dense, minimum_input_shape=minimum_input_shape_for_dense, schedule=dense_schedule, rebuilder=dense_rebuilder),
 
-    QDense : DataSchedule(shape_req=input_dense_schedule_requirement, output_shape=output_shape_for_dense, minimum_input_shape=minimum_input_shape_for_dense, schedule=dense_schedule, rebuilder=dense_rebuilder)
+    QDense : DataSchedule(shape_req=input_dense_schedule_requirement, minimum_output_shape=minimum_output_shape_for_dense, minimum_input_shape=minimum_input_shape_for_dense, schedule=dense_schedule, rebuilder=dense_rebuilder)
 
 }
