@@ -5,7 +5,7 @@ from typing import Optional, Any, Tuple
 from graphviz import Digraph
 
 # Adjust this import path to wherever your LRGraph types live
-from .lr_graph import LRGraph, LogicNode, PureLogic, RoutingEdge
+from .lr_graph_orig import LRGraph, LogicNode, PureLogic, RoutingEdge
 
 
 def _shape_str(s: Optional[Tuple[Any, ...]]) -> str:

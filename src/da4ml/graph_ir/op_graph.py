@@ -163,30 +163,3 @@ class OpGraphAPI:
         return "\n".join(lines)
     
 
-
-# def replace_dense_with_minimal(dense_node):
-#     def getLeadingDims(node):
-#         shape_of_input = node.requires.shape
-#         leading_shape = shape_of_input[:-1] # all dims except last
-#         return leading_shape
-    
-#     def create_minNode_from_node(node):
-#         leading_dims = getLeading(node)
-#         min_dim = node.requires.shape[-1] # n, feature vector length
-
-#         def construct_min_node_from_trace_and_fx_var(min_dim):
-#             fxinp = FixedVariableArrayInput(1, min_dim) # replace 1 with desired parallelism
-#             inp, out = trace_model(dense_node.model, verbose=True, inputs=fxinp) # trace model with forced shape as min_dim, hopefully node can act as a model.
-#             comb_logic = comb_trace(inp, out)
-#             return CombLogicNode(comb_logic)
-
-#         return construct_min_node_from_trace_and_fx_var(min_dim)
-    
-#     minNode = create_minNode_from_node(dense_node)
-#     routingNodeInp, routingNodeOut = create_routing_for_min_node(minNode, dense_node) # creates and connects routing
-
-#     dense_node._previous._next = routingNodeInp
-#     dense_node._next._previous = routingNodeOut
-    
-#     #software verify the routing and dense.
-

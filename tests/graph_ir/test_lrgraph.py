@@ -1,14 +1,17 @@
 import pytest
 import keras
 import tensorflow as tf
+from graphviz import Source
 
 from hgq.layers import QDense
 from hgq.config import QuantizerConfig
 
 from da4ml.graph_ir.op_graph import *
 from da4ml.graph_ir.scheduling import *
+# from da4ml.graph_ir.lr_graph_orig import *
+# from da4ml.graph_ir.lr_graph_viz_orig import visualize_lr_graph
+
 from da4ml.graph_ir.lr_graph import *
-from da4ml.graph_ir.lr_graph_viz import visualize_lr_graph
 
 
 # @pytest.fixture
@@ -33,19 +36,20 @@ def two_layer_opgraph():
     g = build_graph_from_model(m)
     return g
 
-def test_build_lrgraph_from_opgraph(opgraph):
-    lr_g = build_lr_graph_from_opgraph(opgraph)
+def two_layer_model():
+    i = keras.Input((3,2))
+    d0 = QDense(3, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
+    d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
+    out = d1(d0(i))
+    m = keras.Model(i, out)
+    return m
 
-    # finish these tests, build a working graph, see traversal, visualise it
-    lr_g_api = LRGraphAPI(lr_g)
-    lr_g_api.print()
-    print(lr_g)
-    # assert len(lr_g.logic_nodes.items()) == 3
-    # assert len(lr_g.routing_edges.items()) == 2
-
-    dot_src = visualize_lr_graph(lr_g, filename="/homes/bm920/workspace/da4ml/.tmp/figures/lr_graph", format="svg", view=True)
-    print(dot_src)  # optional
-    
+def test_build_lrgraph_from_model():
+    lr_g = build_lr_graph_from_model(two_layer_model())
+    dot_str = lr_to_dot(lr_g)
+    src = Source(dot_str)
+    src.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2", format="svg", view=True)
 
 # test_build_lrgraph_from_opgraph(simple_opgraph())  
-test_build_lrgraph_from_opgraph(two_layer_opgraph())
+# test_build_lrgraph_from_opgraph(two_layer_opgraph())
+test_build_lrgraph_from_model()

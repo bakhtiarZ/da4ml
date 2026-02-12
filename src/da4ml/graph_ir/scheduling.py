@@ -48,11 +48,11 @@ def input_dense_schedule_requirement(shape: tuple) -> bool:
     met = len(shape) >= 1 and shape[-1] > 0
     return met
 
-def minimum_output_shape_for_dense(output_shape: tuple) -> tuple:
-    return (output_shape[-1],)
+def minimum_output_shape_for_dense(output_shape: tuple) -> tuple: # add parallelism here as input if you like
+    return (1, output_shape[-1])
 
-def minimum_input_shape_for_dense(input_shape: tuple) -> tuple:
-    return (input_shape[-1],)
+def minimum_input_shape_for_dense(input_shape: tuple) -> tuple: # add parallelism here as input if you like
+    return (1, input_shape[-1])
 
 def dense_rebuilder(x: list[keras.KerasTensor], original_shape: tuple) -> keras.KerasTensor:
     if original_shape[0] is None:
