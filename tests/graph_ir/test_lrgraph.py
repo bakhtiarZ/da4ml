@@ -6,6 +6,8 @@ from graphviz import Source
 from hgq.layers import QDense
 from hgq.config import QuantizerConfig
 
+from da4ml.codegen.rtl.rtl_model import get_io_kifs
+
 from da4ml.graph_ir.op_graph import *
 from da4ml.graph_ir.scheduling import *
 # from da4ml.graph_ir.lr_graph_orig import *
@@ -50,6 +52,16 @@ def test_build_lrgraph_from_model():
     src = Source(dot_str)
     src.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2", format="svg", view=True)
 
+
+# def test_write_rtl_from_lrgraph():
+#     lr_g = build_lr_graph_from_model(two_layer_model())
+#     project_dir = "/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl"
+#     rtl_code = lr_graph_to_hardware(lr_g, project_dir)
+#     print(rtl_code)
+
 # test_build_lrgraph_from_opgraph(simple_opgraph())  
 # test_build_lrgraph_from_opgraph(two_layer_opgraph())
 test_build_lrgraph_from_model()
+# test_write_rtl_from_lrgraph()
+
+# quints()

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import product
+import math
+import os
+import shutil
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 
 import keras
+import numpy as np
 
 from da4ml.cmvm.types import CombLogic
 from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
+from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 
 from .scheduling import DataSchedule, _SCHEDULE_REGISTRY
 
@@ -47,10 +53,10 @@ class PureLogic:
 
 @dataclass
 class RoutingLogic:
-    to_hardware: Callable[[Any], Any]
-    schedule: Optional[Any] = None
-    buffer_type: str = "default"
-    buffer_shape: int = 0
+    # to_hardware: Callable[[Any], Any]
+    # schedule: Optional[Any] = None
+    buffer_type: str = "fifo"
+    buffer_shape: tuple[int, int] = (-1, -1)
 
 
 @dataclass
@@ -211,7 +217,10 @@ def build_lr_graph_from_parsed(
         tid = id(t)
         e = lr.routing_edges.get(tid)
         if e is None:
-            e = RoutingEdge(tid=tid, tensor=t)
+            routing_logic = RoutingLogic(
+                buffer_type="default", buffer_shape=(-1, -1), # default routing logic for now; can be customized later
+            )
+            e = RoutingEdge(tid=tid, tensor=t, routing_logic=routing_logic)
             lr.routing_edges[tid] = e
         else:
             if e.tensor is None:
@@ -251,7 +260,26 @@ def build_lr_graph_from_parsed(
             # fan-out supported: same tensor may feed multiple ops
             e.to_nodes.add(op_id)
             e.to_compute_shapes[op_id] = node.input_shapes[id(t)]
-
+            
+            # if edge has is now fully connected (from_node, to_nodes, from_compute_shape, to_compute_shapes), we can fill the routing logic properly
+            if e.from_node is not None and e.from_compute_shape is not None:
+                unique_to_shapes = set(e.to_compute_shapes.values())
+                if len(unique_to_shapes) > 1:
+                    raise ValueError(
+                        f"Edge tid={e.tid} has multiple consumer compute shapes {unique_to_shapes}. This is not supported right now. "
+                        f"Either enforce single shape or store routing logic per consumer."
+                    )
+                to_shape = e.to_compute_shapes[op_id]
+                if tuple(e.from_compute_shape) == tuple(to_shape):
+                    buffer_size = 1
+                else:
+                    buffer_size = math.prod(e.semantic_shape[:-1])  # leading dims only
+                item_size = e.from_compute_shape[-1] # this may not always be -1, need to fix later
+                e.routing_logic = RoutingLogic(
+                    buffer_type=schedule.buffer_type,
+                    buffer_shape=(buffer_size, item_size),
+                )
+                    
         # Wire outputs (this op -> tensor)
         for t in out_ts:
             e = get_edge(t)
@@ -323,40 +351,112 @@ def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
     )
     return out_node_id
 
+def get_bitwidth_from_cl(cs: CombLogic):
+    inp_kif, output_kif = get_io_kifs(cs)
+    inp_bitwidth = sum(np.max(arr) for arr in inp_kif)
+    output_bitwidth = sum(np.max(arr) for arr in output_kif)
+    return int(inp_bitwidth), int(output_bitwidth)
 
+class HWInterface:
+    
+    def __init__(self, node: LogicNode):
+        self.node = node
+        self.comb_logic = node.logic_impl
+        self.input_kif, self.output_kif = get_io_kifs(self.comb_logic)
+        self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
+        self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
+        self.input_item_size = node.input_shapes[node.input_tids[0]][-1] 
+        self.output_item_size = node.output_shapes[node.output_tids[0]][-1]
+    
+    def get_input_info(self):
+        return self.input_bitwidth, self.input_item_size
 
-class LRGraphAPI:
-    def __init__(self, lr_graph: LRGraph):
-        self.lr_graph = lr_graph
+    def get_output_info(self):
+        return self.output_bitwidth, self.output_item_size
+    
+# def lr_graph_to_hardware(lr: LRGraph, project_dir) -> str:
+    
+#     files = []
+#     node_id_to_hw_interface: Dict[int, tuple[HWInterface, str]] = {}
+#     lines = []
+    
+#     #make sure project dir exists
+#     os.makedirs(project_dir, exist_ok=True)
+    
+#     def write_logic_nodes(logic_nodes: Dict[int, LogicNode]) -> tuple[list[str], list[str], Dict[int, str]]:
+#         lines = []
+#         files = []
+#         id_to_interface_req : Dict[int, Dict[]]
+#         for node_id, node in logic_nodes.items():
+#             if type(node.logic_impl) is PureLogic:
+#                 continue
+#             input_bitwidth, output_bitwidth = get_bitwidth_from_cl(node.logic_impl)
+#             hw_interface = HWInterface(node)
+#             node_id_to_hw_interface[node_id] = (hw_interface, instance_name)
+#             op_name = node.operation.__class__.__name__ if node.operation else "PureOutput"
+#             instance_name = f"op_{node_id}__{op_name}"
+#             rtl_model = RTLModel(
+#                 solution=node.logic_impl,
+#                 prj_name = f"mod_{inst_name}",
+#                 path = project_dir,
+#                 flavor = "verilog"
+#             )
+#             rtl_model.write() 
+#             inst_params = "<not_yet_implemented>"
+#             def get_port_conns():
+#                 l = f".clk, .rst, "
+#                 input_buffer_inst_name = f"buffer_{_short_tid(node.input_tids[0])}"
+#                 data_in_port = f".data_in(conn_to_op_{node_id}_from_output_{input_buffer_inst_name})"
+#                 output_buffer_inst_name = f"buffer_{_short_tid(node.output_tids[0])}"
+#                 data_out_port = f".data_out(conn_from_op_{node_id}_to_input_{output_buffer_inst_name})"
+#                 l += data_in_port + ", " + data_out_port
+#                 return l
+#             port_conns = get_port_conns()
+#             instance_line = f"mod_{inst_name} #({inst_params}) {inst_name} ({port_conns});"
+#             lines.append(instance_line)
+#             files.append(f"mod_{inst_name}")
+                        
+#         return lines, files, node_id_to_hw_interface
+    
+#     lines, files, node_id_to_hw_interface = write_logic_nodes(lr.logic_nodes)
+    
+#     def write_routing_edges(routing_edges: Dict[int, RoutingEdge], node_id_to_hw_interface: Dict[int, HWInterface]) -> list[str]:
+#         lines = []
+#         for tid, edge in routing_edges.items():
+#             inst_name = f"buffer_{_short_tid(tid)}"
+#             inst_params = "<not_yet_implemented>"
+#             lines.append(inst_line)
+#             #input intermediate signal
+#             bitwidth = node_id_to_hw_interface[edge.from_node][0].inp_bitwidth
+#             item_size = node_id_to_hw_interface[edge.from_node][0].input_item_size
+#             logic_node_inst_name = node_id_to_hw_interface[edge.from_node][1]
+#             input_intermediate_wire = f"logic [{bitwidth}-1:0] conn_from_op_{edge.from_node}_to_input_{inst_name} [0:{item_size}-1]; assign conn_from_op{edge.from_node}_to_input_{inst_name} = {logic_node_inst_name}.data_out;"
+#             to_node = next(iter(edge.to_nodes))
+#             bitwidth = node_id_to_hw_interface[to_node][0].output_bitwidth
+#             item_size = node_id_to_hw_interface[to_node][0].output_item_size
+#             logic_node_inst_name = node_id_to_hw_interface[to_node][1]
+#             output_intermediate_wire = f"logic [{bitwidth}-1:0] conn_to_op_{to_node}_from_output_{inst_name} [0:{item_size}-1]; assign conn_to_op_{to_node}_from_output_{inst_name} = {inst_name}.data_out"
+            
+#             def get_port_conns():
+#                 data_in_port = f".data_in(conn_from_op_{edge.from_node}_to_input_{inst_name})"
+#                 data_out_port = f".data_out(conn_to_op_{to_node}_from_output_{inst_name})"
+#                 return f"clk, rst, {data_in_port}, {data_out_port}"
+            
+#             inst_line = f"fifo #({inst_params}) {inst_name} ({get_port_conns()});"
+#             lines.append(input_intermediate_wire)
+#             lines.append(output_intermediate_wire)
+#             lines.append(inst_line)
+        
+#         return lines
 
-    def print(self) -> None:
-        print("\nLogic Nodes:")
-        for node_id, n in self.lr_graph.logic_nodes.items():
-            op_name = None
-            if n.operation is not None:
-                op_name = f"{n.operation.__class__.__name__}({getattr(n.operation, 'name', '')})"
-            else:
-                op_name = "PureOutput"
-            print(
-                f"Node {node_id}: {op_name} | "
-                f"in={len(n.input_tids)} out={len(n.output_tids)}"
-            )
-
-        print("\nRouting Edges:")
-        for tid, e in self.lr_graph.routing_edges.items():
-            tname = getattr(e.tensor, "name", str(tid)) if e.tensor is not None else str(tid)
-            print(
-                f"Edge {tname}: "
-                f"from={e.from_node} -> to={sorted(e.to_nodes)} "
-                f"| from_shape={e.from_compute_shape} "
-                f"| to_shapes={{{', '.join(f'{k}:{v}' for k,v in e.to_compute_shapes.items())}}}"
-            )
-        print("")
-
-
+    
+        
 def _short_tid(tid: int, n: int = 6) -> str:
     s = str(tid)
     return s[-n:] if len(s) > n else s
+
+def short_tid(tid: int, n: int = 6) -> str:
+    return _short_tid(tid, n)
 
 def _escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
@@ -368,10 +468,48 @@ def lr_to_dot(lr: LRGraph) -> str:
       - Blue   = PureOutput
       - Yellow = All other logic nodes
       - Structured table layout
+      - Edge labels include routing logic (buffer type/shape) + semantic shape
+      - Edge colors based on whether buffering/reshape is needed (heuristic)
     """
 
-    def esc(s: str) -> str:
+    def esc(s: Any) -> str:
         return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def short_tid(tid: int, n: int = 6) -> str:
+        s = str(tid)
+        return s[-n:] if len(s) > n else s
+
+    def edge_color(e: RoutingEdge, to: int) -> str:
+        """
+        Heuristic:
+          - green if compute shapes match and buffer_shape looks trivial
+          - orange if shapes differ or buffer non-trivial
+          - gray if missing info
+        """
+        to_shape = e.to_compute_shapes.get(to)
+        if e.from_compute_shape is None or to_shape is None:
+            return "gray60"
+
+        same = (tuple(e.from_compute_shape) == tuple(to_shape))
+
+        if e.routing_logic is None:
+            return "gray60"
+
+        # buffer_shape may be int or tuple in your code
+        bs = getattr(e.routing_logic, "buffer_shape", None)
+
+        trivial = False
+        if bs is None:
+            trivial = True
+        elif isinstance(bs, int):
+            trivial = (bs == 0 or bs == 1)
+        elif isinstance(bs, tuple) and len(bs) > 0:
+            # treat (1, item) as small / trivial-ish for visual hint
+            trivial = (bs[0] == 0 or bs[0] == 1)
+
+        if same and trivial:
+            return "forestgreen"
+        return "darkorange"
 
     lines = [
         "digraph LR {",
@@ -383,10 +521,7 @@ def lr_to_dot(lr: LRGraph) -> str:
 
     # -------- Nodes --------
     for node_id, n in lr.logic_nodes.items():
-
-        # ----- Determine node type & colour -----
         if n.operation is None:
-            # Pure output node
             node_color = "#cfe2ff"  # light blue
             op_type = "PureOutput"
             op_name = ""
@@ -399,43 +534,33 @@ def lr_to_dot(lr: LRGraph) -> str:
             op_type = n.operation.__class__.__name__
             op_name = getattr(n.operation, "name", "")
 
-        rows = []
+        rows: List[str] = []
 
-        # Header row
-        rows.append(
-            f'<TR><TD BGCOLOR="{node_color}"><B>op_id: {node_id}</B></TD></TR>'
-        )
-        rows.append(
-            f'<TR><TD ALIGN="left">op: {esc(op_type)}</TD></TR>'
-        )
+        # Header
+        rows.append(f'<TR><TD BGCOLOR="{node_color}"><B>op_id: {node_id}</B></TD></TR>')
+        rows.append(f'<TR><TD ALIGN="left">op: {esc(op_type)}</TD></TR>')
         if op_name:
-            rows.append(
-                f'<TR><TD ALIGN="left">name: {esc(op_name)}</TD></TR>'
-            )
+            rows.append(f'<TR><TD ALIGN="left">name: {esc(op_name)}</TD></TR>')
 
-        # Inputs section
-        rows.append(
-            '<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Inputs</B></TD></TR>'
-        )
+        # Inputs
+        rows.append('<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Inputs</B></TD></TR>')
         if n.input_tids:
             for tid in n.input_tids:
                 shp = n.input_shapes.get(tid)
                 rows.append(
-                    f'<TR><TD ALIGN="left">tid:{str(tid)[-6:]} '
+                    f'<TR><TD ALIGN="left">tid:{short_tid(tid)} '
                     f'shape:{esc(shp)}</TD></TR>'
                 )
         else:
             rows.append('<TR><TD ALIGN="left">(none)</TD></TR>')
 
-        # Outputs section
-        rows.append(
-            '<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Outputs</B></TD></TR>'
-        )
+        # Outputs
+        rows.append('<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Outputs</B></TD></TR>')
         if n.output_tids:
             for tid in n.output_tids:
                 shp = n.output_shapes.get(tid)
                 rows.append(
-                    f'<TR><TD ALIGN="left">tid:{str(tid)[-6:]} '
+                    f'<TR><TD ALIGN="left">tid:{short_tid(tid)} '
                     f'shape:{esc(shp)}</TD></TR>'
                 )
         else:
@@ -446,7 +571,6 @@ def lr_to_dot(lr: LRGraph) -> str:
             + "".join(rows) +
             "</TABLE>>"
         )
-
         lines.append(f'node_{node_id} [label={table}];')
 
     # -------- Edges --------
@@ -455,17 +579,61 @@ def lr_to_dot(lr: LRGraph) -> str:
             continue
 
         tname = getattr(e.tensor, "name", None)
-        tname = tname if tname else f"tensor_{str(tid)[-6:]}"
+        tname = tname if tname else f"tensor_{short_tid(tid)}"
+
+        # routing logic summary
+        r = e.routing_logic
+        if r is None:
+            r_summary = "routing: (none)"
+        else:
+            r_summary = f"routing: {getattr(r, 'buffer_type', None)}  buf:{getattr(r, 'buffer_shape', None)}"
+
+        sem = e.semantic_shape
+        sem_summary = f"semantic: {sem}" if sem is not None else "semantic: (none)"
 
         for to in sorted(e.to_nodes):
             to_shape = e.to_compute_shapes.get(to)
             lbl = (
-                f"{esc(tname)}\\n"
-                f"{esc(e.from_compute_shape)} → {esc(to_shape)}"
+                f"name: {esc(tname)}  tid:{short_tid(tid)}\\n"
+                f"compute: {esc(e.from_compute_shape)} → {esc(to_shape)}\\n"
+                f"{esc(sem_summary)}\\n"
+                f"{esc(r_summary)}"
             )
+            col = edge_color(e, to)
             lines.append(
-                f'node_{e.from_node} -> node_{to} [label="{lbl}"];'
+                f'node_{e.from_node} -> node_{to} '
+                f'[label="{lbl}", color="{col}", fontcolor="{col}"];'
             )
 
     lines.append("}")
     return "\n".join(lines)
+
+
+### depr
+# class LRGraphAPI:
+#     def __init__(self, lr_graph: LRGraph):
+#         self.lr_graph = lr_graph
+
+#     def print(self) -> None:
+#         print("\nLogic Nodes:")
+#         for node_id, n in self.lr_graph.logic_nodes.items():
+#             op_name = None
+#             if n.operation is not None:
+#                 op_name = f"{n.operation.__class__.__name__}({getattr(n.operation, 'name', '')})"
+#             else:
+#                 op_name = "PureOutput"
+#             print(
+#                 f"Node {node_id}: {op_name} | "
+#                 f"in={len(n.input_tids)} out={len(n.output_tids)}"
+#             )
+
+#         print("\nRouting Edges:")
+#         for tid, e in self.lr_graph.routing_edges.items():
+#             tname = getattr(e.tensor, "name", str(tid)) if e.tensor is not None else str(tid)
+#             print(
+#                 f"Edge {tname}: "
+#                 f"from={e.from_node} -> to={sorted(e.to_nodes)} "
+#                 f"| from_shape={e.from_compute_shape} "
+#                 f"| to_shapes={{{', '.join(f'{k}:{v}' for k,v in e.to_compute_shapes.items())}}}"
+#             )
+#         print("")
