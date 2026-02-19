@@ -8,6 +8,7 @@ import shutil
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 
 import keras
+from matplotlib import lines
 import numpy as np
 
 from da4ml.cmvm.types import CombLogic
@@ -276,7 +277,7 @@ def build_lr_graph_from_parsed(
                     buffer_size = math.prod(e.semantic_shape[:-1])  # leading dims only
                 item_size = e.from_compute_shape[-1] # this may not always be -1, need to fix later
                 e.routing_logic = RoutingLogic(
-                    buffer_type=schedule.buffer_type,
+                    buffer_type=schedule.buffer_type if op_id != 1 else "input_buffer", 
                     buffer_shape=(buffer_size, item_size),
                 )
                     
@@ -337,6 +338,15 @@ def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
         e.to_nodes.add(out_node_id)
         to_shape = e.semantic_shape if e.semantic_shape is not None else e.from_compute_shape
         e.to_compute_shapes[out_node_id] = to_shape
+        if tuple(e.from_compute_shape) == tuple(to_shape):
+            buffer_size = 1
+        else:
+            buffer_size = math.prod(e.semantic_shape[:-1])  # leading dims only
+        item_size = e.from_compute_shape[-1] # this may not always be -1, need to fix later
+        e.routing_logic = RoutingLogic(
+            buffer_type="output_buffer", # hardcoded for now; can be customized later, should be a memory or something.
+            buffer_shape=(buffer_size, item_size),
+        )
         input_shapes[tid] = to_shape
 
     lr.logic_nodes[out_node_id] = LogicNode(
@@ -374,80 +384,98 @@ class HWInterface:
     def get_output_info(self):
         return self.output_bitwidth, self.output_item_size
     
-# def lr_graph_to_hardware(lr: LRGraph, project_dir) -> str:
+
+def create_logic_node_hw(node_id, node, project_dir):
+    hw_interface = HWInterface(node)
+    lines = []
+
+    # input intermediate sig
+    in_bw, in_sz = hw_interface.get_input_info()
+    in_sig = f"inp_to_op_{node_id}"
+    lines.append(f"logic [{in_bw-1}:0] {in_sig} [0:{in_sz-1}];")
+
+    # output intermediate sig
+    out_bw, out_sz = hw_interface.get_output_info()
+    out_sig = f"out_from_op_{node_id}"
+    lines.append(f"logic [{out_bw-1}:0] {out_sig} [0:{out_sz-1}];")
+
+    op_name = node.operation.__class__.__name__ if node.operation else "PureOutput"
+    instance_name = f"op_{node_id}__{op_name}"
+
+    rtl_model = RTLModel(
+        solution=node.logic_impl,
+        prj_name=f"mod_{instance_name}",
+        path=project_dir,
+        flavor="verilog",
+    )
+    rtl_model.write()
+    port_conns = f".clk(clk), .rst(rst), .data_in({in_sig}), .data_out({out_sig})"
+    lines.append(f"mod_{instance_name} {instance_name} ({port_conns});")
+    return lines, in_sig, out_sig, out_bw, out_sz
+
+
+def create_buffer(src_sig, bitwidth, item_size, r_edge):
+    inst_name = f"buffer_{short_tid(r_edge.tid)}"
+    to_node_id = next(iter(r_edge.to_nodes))
+    buf_out_sig = f"edge_to_op_{to_node_id}_from_output_{inst_name}"
+    buffer_size = r_edge.routing_logic.buffer_shape[0]
+    decl = f"logic [{bitwidth-1}:0] {buf_out_sig} [0:{item_size-1}];"
+    inst_params = f"DEPTH({buffer_size}), DATA_WIDTH({bitwidth}), DATA_SIZE({item_size})"
+    inst = (
+        f"fifo_packed #({inst_params}) {inst_name} "
+        f"(.clk(clk), .rst(rst), .data_in({src_sig}), .data_out({buf_out_sig}));"
+    )
+    return decl, inst, buf_out_sig
+
+def create_preamble(name):
+    # this shouldn't really be parameters
+    module_declaration = f"""module {name} (
+        input logic clk, 
+        input logic rst, 
+        input logic [DATA_IN_WIDTH-1:0] data_in [0:DATA_IN_SIZE-1], 
+        output logic [DATA_OUT_WIDTH-1:0] data_out [0:DATA_OUT_SIZE-1]
+    );
+    """ 
+    return module_declaration
     
-#     files = []
-#     node_id_to_hw_interface: Dict[int, tuple[HWInterface, str]] = {}
-#     lines = []
     
-#     #make sure project dir exists
-#     os.makedirs(project_dir, exist_ok=True)
+def lr_graph_to_hardware(lr: LRGraph, project_dir: str, debug=False) -> int:
+    lines = []
+    os.makedirs(project_dir, exist_ok=True)
+    #copy the src file for fifo_packed
     
-#     def write_logic_nodes(logic_nodes: Dict[int, LogicNode]) -> tuple[list[str], list[str], Dict[int, str]]:
-#         lines = []
-#         files = []
-#         id_to_interface_req : Dict[int, Dict[]]
-#         for node_id, node in logic_nodes.items():
-#             if type(node.logic_impl) is PureLogic:
-#                 continue
-#             input_bitwidth, output_bitwidth = get_bitwidth_from_cl(node.logic_impl)
-#             hw_interface = HWInterface(node)
-#             node_id_to_hw_interface[node_id] = (hw_interface, instance_name)
-#             op_name = node.operation.__class__.__name__ if node.operation else "PureOutput"
-#             instance_name = f"op_{node_id}__{op_name}"
-#             rtl_model = RTLModel(
-#                 solution=node.logic_impl,
-#                 prj_name = f"mod_{inst_name}",
-#                 path = project_dir,
-#                 flavor = "verilog"
-#             )
-#             rtl_model.write() 
-#             inst_params = "<not_yet_implemented>"
-#             def get_port_conns():
-#                 l = f".clk, .rst, "
-#                 input_buffer_inst_name = f"buffer_{_short_tid(node.input_tids[0])}"
-#                 data_in_port = f".data_in(conn_to_op_{node_id}_from_output_{input_buffer_inst_name})"
-#                 output_buffer_inst_name = f"buffer_{_short_tid(node.output_tids[0])}"
-#                 data_out_port = f".data_out(conn_from_op_{node_id}_to_input_{output_buffer_inst_name})"
-#                 l += data_in_port + ", " + data_out_port
-#                 return l
-#             port_conns = get_port_conns()
-#             instance_line = f"mod_{inst_name} #({inst_params}) {inst_name} ({port_conns});"
-#             lines.append(instance_line)
-#             files.append(f"mod_{inst_name}")
-                        
-#         return lines, files, node_id_to_hw_interface
-    
-#     lines, files, node_id_to_hw_interface = write_logic_nodes(lr.logic_nodes)
-    
-#     def write_routing_edges(routing_edges: Dict[int, RoutingEdge], node_id_to_hw_interface: Dict[int, HWInterface]) -> list[str]:
-#         lines = []
-#         for tid, edge in routing_edges.items():
-#             inst_name = f"buffer_{_short_tid(tid)}"
-#             inst_params = "<not_yet_implemented>"
-#             lines.append(inst_line)
-#             #input intermediate signal
-#             bitwidth = node_id_to_hw_interface[edge.from_node][0].inp_bitwidth
-#             item_size = node_id_to_hw_interface[edge.from_node][0].input_item_size
-#             logic_node_inst_name = node_id_to_hw_interface[edge.from_node][1]
-#             input_intermediate_wire = f"logic [{bitwidth}-1:0] conn_from_op_{edge.from_node}_to_input_{inst_name} [0:{item_size}-1]; assign conn_from_op{edge.from_node}_to_input_{inst_name} = {logic_node_inst_name}.data_out;"
-#             to_node = next(iter(edge.to_nodes))
-#             bitwidth = node_id_to_hw_interface[to_node][0].output_bitwidth
-#             item_size = node_id_to_hw_interface[to_node][0].output_item_size
-#             logic_node_inst_name = node_id_to_hw_interface[to_node][1]
-#             output_intermediate_wire = f"logic [{bitwidth}-1:0] conn_to_op_{to_node}_from_output_{inst_name} [0:{item_size}-1]; assign conn_to_op_{to_node}_from_output_{inst_name} = {inst_name}.data_out"
-            
-#             def get_port_conns():
-#                 data_in_port = f".data_in(conn_from_op_{edge.from_node}_to_input_{inst_name})"
-#                 data_out_port = f".data_out(conn_to_op_{to_node}_from_output_{inst_name})"
-#                 return f"clk, rst, {data_in_port}, {data_out_port}"
-            
-#             inst_line = f"fifo #({inst_params}) {inst_name} ({get_port_conns()});"
-#             lines.append(input_intermediate_wire)
-#             lines.append(output_intermediate_wire)
-#             lines.append(inst_line)
+    preamble = create_preamble("top_module")
+    lines.append(preamble)
+    include_output_buffer = False # temp
+    for node_id, node in lr.logic_nodes.items():
+        if node_id == 0:
+            prev_sig = f"data_in"
+            continue
+        if node_id == max(lr.logic_nodes.keys()):
+            lines.append(f"assign data_out = {prev_sig};")
+            continue
+        ln_lines, input_sig, op_out_sig, out_bw, out_sz = create_logic_node_hw(node_id, node, project_dir)
+        lines.extend(ln_lines)
         
-#         return lines
+        if (not include_output_buffer and node_id == max(lr.logic_nodes.keys()) - 1):
+            prev_sig = op_out_sig
+            continue
+        
+        lines.append(f"assign {input_sig} = {prev_sig};")
+        edge_for_buffer = lr.routing_edges[node.output_tids[0]]
+        decl, inst, buf_out_sig = create_buffer(op_out_sig, out_bw, out_sz, edge_for_buffer)
+        lines.append(decl)
+        lines.append(inst)
+        prev_sig = buf_out_sig 
+    
+    lines.append("\nendmodule")
+    if debug:
+        print("\n".join(lines))
+    shutil.copy("src/da4ml/codegen/rtl/verilog/source/fifo_packed.sv", f"{project_dir}/src/static/fifo_packed.sv")
+    with open(f"{project_dir}/top_module.sv", "w") as f:
+        f.write("\n".join(lines))
+    return len(lines)
+
 
     
         
@@ -464,12 +492,16 @@ def _escape(s: str) -> str:
 def lr_to_dot(lr: LRGraph) -> str:
     """
     Graphviz DOT with:
-      - Green  = InputLayer
-      - Blue   = PureOutput
-      - Yellow = All other logic nodes
-      - Structured table layout
-      - Edge labels include routing logic (buffer type/shape) + semantic shape
-      - Edge colors based on whether buffering/reshape is needed (heuristic)
+      - Node colors:
+          * InputLayer  = green
+          * PureOutput  = blue
+          * Other ops   = yellow
+      - Structured HTML-table node labels
+      - Edge labels include:
+          * tensor name + tid(short)
+          * compute: from_compute_shape -> to_compute_shape(for that consumer)
+          * semantic_shape
+          * routing logic: buffer_type + buffer_shape
     """
 
     def esc(s: Any) -> str:
@@ -480,34 +512,11 @@ def lr_to_dot(lr: LRGraph) -> str:
         return s[-n:] if len(s) > n else s
 
     def edge_color(e: RoutingEdge, to: int) -> str:
-        """
-        Heuristic:
-          - green if compute shapes match and buffer_shape looks trivial
-          - orange if shapes differ or buffer non-trivial
-          - gray if missing info
-        """
+        # simple heuristic colouring (optional but helpful)
         to_shape = e.to_compute_shapes.get(to)
         if e.from_compute_shape is None or to_shape is None:
             return "gray60"
-
-        same = (tuple(e.from_compute_shape) == tuple(to_shape))
-
-        if e.routing_logic is None:
-            return "gray60"
-
-        # buffer_shape may be int or tuple in your code
-        bs = getattr(e.routing_logic, "buffer_shape", None)
-
-        trivial = False
-        if bs is None:
-            trivial = True
-        elif isinstance(bs, int):
-            trivial = (bs == 0 or bs == 1)
-        elif isinstance(bs, tuple) and len(bs) > 0:
-            # treat (1, item) as small / trivial-ish for visual hint
-            trivial = (bs[0] == 0 or bs[0] == 1)
-
-        if same and trivial:
+        if tuple(e.from_compute_shape) == tuple(to_shape):
             return "forestgreen"
         return "darkorange"
 
@@ -535,34 +544,24 @@ def lr_to_dot(lr: LRGraph) -> str:
             op_name = getattr(n.operation, "name", "")
 
         rows: List[str] = []
-
-        # Header
         rows.append(f'<TR><TD BGCOLOR="{node_color}"><B>op_id: {node_id}</B></TD></TR>')
         rows.append(f'<TR><TD ALIGN="left">op: {esc(op_type)}</TD></TR>')
         if op_name:
             rows.append(f'<TR><TD ALIGN="left">name: {esc(op_name)}</TD></TR>')
 
-        # Inputs
         rows.append('<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Inputs</B></TD></TR>')
         if n.input_tids:
             for tid in n.input_tids:
                 shp = n.input_shapes.get(tid)
-                rows.append(
-                    f'<TR><TD ALIGN="left">tid:{short_tid(tid)} '
-                    f'shape:{esc(shp)}</TD></TR>'
-                )
+                rows.append(f'<TR><TD ALIGN="left">tid:{short_tid(tid)}  shape:{esc(shp)}</TD></TR>')
         else:
             rows.append('<TR><TD ALIGN="left">(none)</TD></TR>')
 
-        # Outputs
         rows.append('<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Outputs</B></TD></TR>')
         if n.output_tids:
             for tid in n.output_tids:
                 shp = n.output_shapes.get(tid)
-                rows.append(
-                    f'<TR><TD ALIGN="left">tid:{short_tid(tid)} '
-                    f'shape:{esc(shp)}</TD></TR>'
-                )
+                rows.append(f'<TR><TD ALIGN="left">tid:{short_tid(tid)}  shape:{esc(shp)}</TD></TR>')
         else:
             rows.append('<TR><TD ALIGN="left">(none)</TD></TR>')
 
@@ -581,24 +580,26 @@ def lr_to_dot(lr: LRGraph) -> str:
         tname = getattr(e.tensor, "name", None)
         tname = tname if tname else f"tensor_{short_tid(tid)}"
 
-        # routing logic summary
-        r = e.routing_logic
-        if r is None:
+        # routing logic summary (same for all fan-outs in Option A)
+        if e.routing_logic is None:
             r_summary = "routing: (none)"
         else:
-            r_summary = f"routing: {getattr(r, 'buffer_type', None)}  buf:{getattr(r, 'buffer_shape', None)}"
+            bt = getattr(e.routing_logic, "buffer_type", None)
+            bs = getattr(e.routing_logic, "buffer_shape", None)
+            r_summary = f"routing: {bt}  buf:{bs}"
 
-        sem = e.semantic_shape
-        sem_summary = f"semantic: {sem}" if sem is not None else "semantic: (none)"
+        sem_summary = f"semantic: {e.semantic_shape}" if e.semantic_shape is not None else "semantic: (none)"
 
         for to in sorted(e.to_nodes):
             to_shape = e.to_compute_shapes.get(to)
+
             lbl = (
                 f"name: {esc(tname)}  tid:{short_tid(tid)}\\n"
                 f"compute: {esc(e.from_compute_shape)} → {esc(to_shape)}\\n"
                 f"{esc(sem_summary)}\\n"
                 f"{esc(r_summary)}"
             )
+
             col = edge_color(e, to)
             lines.append(
                 f'node_{e.from_node} -> node_{to} '

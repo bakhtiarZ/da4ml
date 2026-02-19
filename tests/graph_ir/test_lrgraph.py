@@ -15,6 +15,21 @@ from da4ml.graph_ir.scheduling import *
 
 from da4ml.graph_ir.lr_graph import *
 
+from pathlib import Path
+
+def make_next_numbered_dir(base_dir: str | Path, prefix: str = "", suffix: str = "") -> Path:
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+
+    i = 0
+    while True:
+        candidate = base / f"{prefix}{i}{suffix}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            i += 1
+
 
 # @pytest.fixture
 def simple_opgraph():
@@ -53,15 +68,16 @@ def test_build_lrgraph_from_model():
     src.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2", format="svg", view=True)
 
 
-# def test_write_rtl_from_lrgraph():
-#     lr_g = build_lr_graph_from_model(two_layer_model())
-#     project_dir = "/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl"
-#     rtl_code = lr_graph_to_hardware(lr_g, project_dir)
-#     print(rtl_code)
+def test_write_rtl_from_lrgraph():
+    lr_g = build_lr_graph_from_model(two_layer_model())
+    project_dir = make_next_numbered_dir('/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/', prefix='project_')
+    rtl_code = lr_graph_to_hardware(lr_g, project_dir, debug=True)
+    print(f"RTL code written to project directory: {project_dir}/top_module.sv")
+    print(rtl_code)
 
 # test_build_lrgraph_from_opgraph(simple_opgraph())  
 # test_build_lrgraph_from_opgraph(two_layer_opgraph())
-test_build_lrgraph_from_model()
+# test_build_lrgraph_from_model()
 # test_write_rtl_from_lrgraph()
 
-# quints()
+test_write_rtl_from_lrgraph()
