@@ -72,8 +72,8 @@ def test_write_rtl_from_lrgraph():
     lr_g = build_lr_graph_from_model(two_layer_model())
     project_dir = make_next_numbered_dir('/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/', prefix='project_')
     rtl_code = lr_graph_to_hardware(lr_g, project_dir, debug=True)
-    print(f"RTL code written to project directory: {project_dir}/top_module.sv")
     print(rtl_code)
+    print(f"RTL code written to project directory: {project_dir}/top_module.sv")
 
 # test_build_lrgraph_from_opgraph(simple_opgraph())  
 # test_build_lrgraph_from_opgraph(two_layer_opgraph())
