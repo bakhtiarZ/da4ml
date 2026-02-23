@@ -30,7 +30,54 @@ def make_next_numbered_dir(base_dir: str | Path, prefix: str = "", suffix: str =
         except FileExistsError:
             i += 1
 
+def interpret_as(
+    x: np.ndarray,
+    k: np.ndarray|int,
+    i: np.ndarray|int,
+    f: np.ndarray|int,
+) -> np.ndarray:
+    b = k + i + f
+    bias = 2.0 ** (b - 1) * k
+    return (np.floor(x + bias) % 2.0**b - bias) * 2.0**-f
 
+def encode_to(
+    x: np.ndarray,
+    k: np.ndarray|int,
+    i: np.ndarray|int,
+    f: np.ndarray|int,
+) -> np.ndarray:
+    return np.floor(x * 2.0**f).astype(int) % 2**(k + i + f)
+
+def encode_to_d(
+    x: np.ndarray,
+    k: np.ndarray|int,
+    i: np.ndarray|int,
+    f: np.ndarray|int,
+    as_hex:bool=False,
+    packed:bool=True,
+):
+    """Encode the input array `x` to hex string dump either in packed or unpacked format.
+    packed: the ones at unwrapped interfaces
+    unpacked: the ones at internal interfaces (for direct input from binder, some bits may appear at places where the bits are unused)
+
+    x, k, i, f: input array, keep_negative, integer (e. sign), fractional.
+    """
+    x_int = encode_to(x, k, i, f)
+    if not packed:
+        _df = np.max(f) - f
+        x_int <<= _df
+        k,i,f = np.max(k), np.max(i), np.max(f)
+    bb = k + i + f
+    if not isinstance(bb, np.ndarray):
+        bb = np.full_like(x_int, bb)
+    accum = 0
+    for v, b in zip(x_int[::-1], bb[::-1]):
+        accum<<=int(b)
+        accum|=int(v)
+    if as_hex:
+        return hex(accum)[2:]
+    else:
+        return accum
 # @pytest.fixture
 def simple_opgraph():
     i = keras.Input((3,2))
@@ -81,4 +128,4 @@ def test_write_rtl_from_lrgraph():
 # test_build_lrgraph_from_model()
 # test_write_rtl_from_lrgraph()
 
-test_write_rtl_from_lrgraph()
+# test_write_rtl_from_lrgraph()

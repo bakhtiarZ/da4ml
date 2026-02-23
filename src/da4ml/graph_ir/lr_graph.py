@@ -383,91 +383,6 @@ class HWInterface:
     def get_output_bw_is(self):
         return self.output_bitwidth, self.output_item_size
 
-# def create_logic_node_hw(node_id, node, project_dir):
-#     hw_interface = HWInterface(node)
-#     lines = []
-
-#     # input intermediate sig
-#     in_bw, in_sz = hw_interface.get_input_bw_is()
-#     in_sig = f"inp_to_op_{node_id}"
-#     lines.append(f"logic [{in_bw * in_sz - 1}:0] {in_sig};")
-
-#     # output intermediate sig
-#     out_bw, out_sz = hw_interface.get_output_bw_is()
-#     out_sig = f"out_from_op_{node_id}"
-#     lines.append(f"logic [{out_bw * out_sz - 1}:0] {out_sig};")
-
-#     op_name = node.operation.__class__.__name__ if node.operation else "PureOutput"
-#     instance_name = f"op_{node_id}__{op_name}"
-
-#     rtl_model = RTLModel(
-#         solution=node.logic_impl,
-#         prj_name=f"mod_{instance_name}",
-#         path=project_dir,
-#         flavor="verilog",
-#     )
-#     rtl_model.write()
-#     port_conns = f".model_inp({in_sig}), .model_out({out_sig})" # rn its unclocked with no rst
-#     lines.append(f"mod_{instance_name} {instance_name} ({port_conns});")
-#     return lines, in_sig, out_sig, out_bw, out_sz
-
-
-# def create_buffer(src_sig, bitwidth, item_size, r_edge):
-#     inst_name = f"buffer_{short_tid(r_edge.tid)}"
-#     to_node_id = next(iter(r_edge.to_nodes))
-#     buf_out_sig = f"edge_to_op_{to_node_id}_from_output_{inst_name}"
-#     buffer_size = r_edge.routing_logic.buffer_shape[0]
-#     out_decl = f"logic [{bitwidth * item_size - 1}:0] {buf_out_sig};"
-#     in_ready_sig = f"{inst_name}_in_ready"
-#     # in_valid_sig = f"{inst_name}_in_valid"
-#     decl = f"logic {in_ready_sig};\n{out_decl}"
-#     inst_params = f"DEPTH({buffer_size}), DATA_WIDTH({bitwidth}), DATA_SIZE({item_size})"
-#     inst = (
-#         f"fifo_rv #({inst_params}) {inst_name} "
-#         f"(.clk(clk), .rst(rst), .in_data({src_sig}), .in_valid(1'b1), .in_ready({in_ready_sig}), .out_data({buf_out_sig}), .out_valid(out_valid_{inst_name}), out_ready(1));"
-#     )
-#     return decl, inst, buf_out_sig
-
-
-# def lr_graph_to_hardware(lr: LRGraph, project_dir: str | Path, debug=False) -> int:
-#     lines = []
-#     os.makedirs(project_dir, exist_ok=True)
-#     #copy the src file for fifo_rv
-    
-#     preamble = create_preamble("top_module", lr)
-#     lines.append(preamble)
-#     include_output_buffer = False # temp
-#     prev_sig = "NONE_this_existing_is_a_bug"
-
-#     for node_id, node in lr.logic_nodes.items():
-#         if node_id == 0:
-#             prev_sig = f"data_in"
-#             continue
-#         if node_id == max(lr.logic_nodes.keys()):
-#             lines.append(f"assign data_out = {prev_sig};")
-#             continue
-#         ln_lines, input_sig, input_valid_sig, out_ready_sig op_out_sig, out_bw, out_sz = create_logic_node_hw(node_id, node, project_dir)
-#         lines.extend(ln_lines)
-        
-#         lines.append(f"assign {input_sig} = {prev_sig};")
-#         if (not include_output_buffer and node_id == max(lr.logic_nodes.keys()) - 1):
-#             prev_sig = op_out_sig
-#             continue
-        
-#         edge_for_buffer = lr.routing_edges[node.output_tids[0]]
-#         decl, inst, buf_out_sig = create_buffer(op_out_sig, out_bw, out_sz, edge_for_buffer)
-#         lines.append(decl)
-#         lines.append(inst)
-#         prev_sig = buf_out_sig 
-    
-#     lines.append("\nendmodule")
-#     if debug:
-#         print("\n".join(lines))
-#     shutil.copy("src/da4ml/codegen/rtl/verilog/source/fifo_rv.sv", f"{project_dir}/src/static/fifo_rv.sv")
-#     with open(f"{project_dir}/top_module.sv", "w") as f:
-#         f.write("\n".join(lines))
-#     return len(lines)
-
 
 class PortConnection:
     def __init__(self, data: tuple[str, int], valid: str, ready: str):
@@ -546,9 +461,9 @@ def create_buffer(packed_bitwidth, r_edge):
         ready=f"in_ready_from_{inst_name}"
     )
     lines.append("\n".join(output_port_conns.get_intermediate_decls()))
-    inst_params = f".DEPTH({buffer_size}), .DATA_WIDTH({packed_bitwidth}))"
+    inst_params = f".DEPTH({buffer_size}), .DATA_WIDTH({packed_bitwidth})"
     lines.append(
-        f"fifo_rv #({inst_params}) {inst_name} (.clk(clk), .rst(rst), .in_data({input_port_conns.data[0]}), .in_valid({input_port_conns.valid}), .out_ready({input_port_conns.ready}), .out_data({output_port_conns.data[0]}), .out_valid({output_port_conns.valid}), .in_ready({output_port_conns.ready}));"
+        f"fifo_rv #({inst_params}) {inst_name} (.clk(clk), .rst(rst), .in_data({input_port_conns.data[0]}), .in_valid({input_port_conns.valid}), .out_ready({input_port_conns.ready}), .out_data({output_port_conns.data[0]}), .out_valid({output_port_conns.valid}), .in_ready({output_port_conns.ready}), /* verilator lint_off PINCONNECTEMPTY */ .full(), .empty(), .count() /* verilator lint_on PINCONNECTEMPTY */);"
     )
     lines.append(f"// End of buffer for edge tid={r_edge.tid}")
     return lines, input_port_conns, output_port_conns
@@ -623,7 +538,7 @@ def lr_graph_to_hardware(lr: LRGraph, project_dir: str | Path, debug=False) -> i
     lines.append("\nendmodule")
     if debug:
         print("\n".join(lines))
-    shutil.copy("src/da4ml/codegen/rtl/verilog/source/fifo_rv.sv", f"{project_dir}/src/static/fifo_rv.sv")
+    shutil.copy("/homes/bm920/workspace/da4ml/src/da4ml/codegen/rtl/verilog/source/fifo_rv.sv", f"{project_dir}/src/static/fifo_rv.sv")
     with open(f"{project_dir}/top_module.sv", "w") as f:
         f.write("\n".join(lines))
     return len(lines)

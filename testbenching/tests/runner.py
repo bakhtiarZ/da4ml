@@ -1,6 +1,8 @@
+from os import getenv
 from pathlib import Path
 import shutil
 from cocotb_test.simulator import run
+from cocotb_tools.runner import get_runner 
 from da4ml_test_utils.graph_ir.test_lrgraph import two_layer_model, make_next_numbered_dir
 
 RTL_DIR = Path(__file__).parent / "rtl"
@@ -18,29 +20,33 @@ def create_verilog_sources(dir):
     lr_g = build_lr_graph_from_model(model)
     project_dir = make_next_numbered_dir('/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/', prefix='project_')
     # Generate RTL code for the LR graph and write to file
-    lines_written = lr_graph_to_hardware(lr_g, project_dir, debug=True)
+    lines_written = lr_graph_to_hardware(lr_g, project_dir, debug=False)
     shutil.copytree(project_dir/f"src", dir, dirs_exist_ok=True)
     shutil.copy(project_dir/f"top_module.sv", dir)
 
 def main():
-
+    SIM = getenv("SIM", "verilator")
     create_verilog_sources(RTL_DIR)
     verilog_sources = sorted(map(str, RTL_DIR.rglob("*.v")))
     verilog_sources += sorted(map(str, RTL_DIR.rglob("*.sv")))
     print("Verilog sources:", verilog_sources, "\n")  # debug
-    run(
-        simulator="verilator",          
+    runner = get_runner(SIM)
+    runner.build(
         verilog_sources=verilog_sources,
-        toplevel="top_module",
-        module="test_top_simple", # name of python test module (without .py)
-        # extra_env={
-        #     "TEST_VECTOR_LEN": "128",
-        #     "PIPELINE_LATENCY": "3",
-        #     "MODEL_PATH": "models/golden.keras",
-        # }
-        # extra compile flags if needed:
-        compile_args=["--sv", "--timing"],
-        # waves=True,  # supported by some sims; otherwise pass sim_args
+        hdl_toplevel="top_module",
+        build_args=[
+            "--trace",
+            "--trace-structs",
+            "-O0",
+            "-build-jobs", "8",
+        ],
+        waves=True,
+        always=True,        
+    )
+    runner.test(
+        hdl_toplevel="top_module",
+        test_module="test_top_simple",
+        waves=True,
     )
 
 if __name__ == "__main__":
