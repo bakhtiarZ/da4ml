@@ -5,7 +5,8 @@ from keras import ops
 import tensorflow as tf
 
 from hgq.layers import QDense
-
+from da4ml.cmvm.types import CombLogic
+from da4ml.graph_ir.hardware_types import QSumLogic
 @dataclass
 class DataSchedule():
     shape_req: Callable[[tuple], bool]
@@ -14,6 +15,7 @@ class DataSchedule():
     schedule : Callable 
     rebuilder:  Callable
     buffer_type: str 
+    hardware_type: Type
     
 class DataScheduler():
     def __init__(self, data_schedule) -> None:
@@ -134,8 +136,30 @@ def conv1d_extract_windows(
     w = ops.transpose(w, (1, 0, 2, 3))
     return w
 
+def input_qsum_requirement(shape):
+    return len(shape) > 0 and not all([axis is None for axis in shape])
+
+def minimum_output_shape_for_qsum(output_shape, axis):
+    new_output_shape = output_shape[:axis] + (1,) + output_shape[axis+1:]
+    return new_output_shape
+
+def minimum_input_shape_for_qsum(input_shape, axis):
+    return input_shape[axis] is not None and input_shape[axis] > 0
+
+def qsum_schedule(x, axis):
+    # tensor --> split on that axis, sum clock by clock...
+    new_output_shape = x.shape[:axis] + (1,) + x.shape[axis+1:]
+    flattened_shape = (-1) + new_output_shape
+    flattened = tf.reshape(x, flattened_shape)
+    vectors = tf.unstack(flattened, axis=0)
+    return vectors
+    
+def qsum_rebuilder(x, axis):
+    return x # no rebuilding    
 
 _SCHEDULE_REGISTRY : dict[type, DataSchedule] = {
     # keras.layers.Dense : DataSchedule(shape_req=input_dense_schedule_requirement, minimum_output_shape=minimum_output_shape_for_dense, minimum_input_shape=minimum_input_shape_for_dense, schedule=dense_schedule, rebuilder=dense_rebuilder),
-    QDense : DataSchedule(shape_req=input_dense_schedule_requirement, minimum_output_shape=minimum_output_shape_for_dense, minimum_input_shape=minimum_input_shape_for_dense, schedule=dense_schedule, rebuilder=dense_rebuilder, buffer_type="fifo"),
+    QDense : DataSchedule(shape_req=input_dense_schedule_requirement, minimum_output_shape=minimum_output_shape_for_dense, minimum_input_shape=minimum_input_shape_for_dense, schedule=dense_schedule, rebuilder=dense_rebuilder, buffer_type="fifo", hardware_type=CombLogic),
+    
+    QSum : DataSchedule(shape_req=input_qsum_requirement, minimum_output_shape=minimum_output_shape_for_qsum, minimum_input_shape=minimum_input_shape_for_qsum, schedule=qsum_schedule, rebuilder=qsum_rebuilder, buffer_type="fifo", hardware_type=QSumLogic)
 }

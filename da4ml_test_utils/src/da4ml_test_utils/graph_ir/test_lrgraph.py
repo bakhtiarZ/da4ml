@@ -3,7 +3,7 @@ import keras
 import tensorflow as tf
 from graphviz import Source
 
-from hgq.layers import QDense
+from hgq.layers import QDense, QAdd, QSum
 from hgq.config import QuantizerConfig
 
 from da4ml.codegen.rtl.rtl_model import get_io_kifs
@@ -108,17 +108,34 @@ def two_layer_model():
     m = keras.Model(i, out)
     return m
 
-def test_build_lrgraph_from_model():
-    lr_g = build_lr_graph_from_model(two_layer_model())
+def split_join_model():
+    i = keras.Input((3,1))
+    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=False)(i)
+    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(i)
+    out = QAdd()([s,d0])
+    print(out)
+    m = keras.Model(i, out)
+    return m
+
+def simple_qsum():
+    i = keras.Input((3,1))
+    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=False)(i)
+    m = keras.Model(i, s)
+    return m
+
+
+def test_build_lrgraph_from_model(model):
+    lr_g = build_lr_graph_from_model(model)
     dot_str = lr_to_dot(lr_g)
     src = Source(dot_str)
     src.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2", format="svg", view=True)
 
 
-def test_write_rtl_from_lrgraph():
-    lr_g = build_lr_graph_from_model(two_layer_model())
+def test_write_rtl_from_lrgraph(model):
+    lr_g = build_lr_graph_from_model(model)
     # project_dir = make_next_numbered_dir('/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/', prefix='project_')
-    project_dir = f"/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/project_test"
+    name = model.name if model.name else "model"
+    project_dir = f"/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/project_test/{name}"
     rtl_code = lr_graph_to_hardware(lr_g, project_dir, debug=True)
     print(rtl_code)
     print(f"RTL code written to project directory: {project_dir}/top_module.sv")
@@ -128,4 +145,6 @@ def test_write_rtl_from_lrgraph():
 # test_build_lrgraph_from_model()
 # test_write_rtl_from_lrgraph()
 
-# test_write_rtl_from_lrgraph()
+# test_write_rtl_from_lrgraph(simple_qsum())
+test_build_lrgraph_from_model(simple_qsum())
+

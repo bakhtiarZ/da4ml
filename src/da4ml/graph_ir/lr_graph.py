@@ -17,6 +17,7 @@ from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 
+from .hardware_types import PortConnection, HWInterface, PureLogic
 from .scheduling import DataSchedule, _SCHEDULE_REGISTRY
 
 
@@ -49,9 +50,6 @@ def parse_model(model: keras.Model) -> List[List[OpRepr]]:
         operators[depth] = _oprs
     return [operators[i] for i in range(max(operators.keys()), -1, -1)]
 
-@dataclass
-class PureLogic:
-    empty_logic: bool = True  # marker type
 
 @dataclass
 class RoutingLogic:
@@ -366,39 +364,6 @@ def get_bitwidth_from_cl(cs: CombLogic):
     output_bitwidth = sum(np.max(arr) for arr in output_kif)
     return int(inp_bitwidth), int(output_bitwidth)
 
-class HWInterface:
-    
-    def __init__(self, node: LogicNode):
-        self.node = node
-        self.comb_logic = node.logic_impl
-        self.input_kif, self.output_kif = get_io_kifs(self.comb_logic)
-        self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
-        self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
-        self.input_item_size = node.input_shapes[node.input_tids[0]][-1] 
-        self.output_item_size = node.output_shapes[node.output_tids[0]][-1]
-    
-    def get_input_bw_is(self):
-        return self.input_bitwidth, self.input_item_size
-
-    def get_output_bw_is(self):
-        return self.output_bitwidth, self.output_item_size
-
-
-class PortConnection:
-    def __init__(self, data: tuple[str, int], valid: str, ready: str):
-        self.data = data # (name, bitwidth)
-        self.valid = valid
-        self.ready = ready
-    
-    def get_intermediate_decls(self):
-        data_decl = f"logic [{self.data[1]-1}:0] {self.data[0]};"
-        valid_decl = f"logic {self.valid};"
-        ready_decl = f"logic {self.ready};"
-        return data_decl, valid_decl, ready_decl
-    
-    def __str__(self):
-        return f"data={self.data}, valid={self.valid}, ready={self.ready}"
-
 
 def create_logic_node_hw(node_id, node, project_dir):
     lines = []
@@ -543,8 +508,6 @@ def lr_graph_to_hardware(lr: LRGraph, project_dir: str | Path, debug=False) -> i
         f.write("\n".join(lines))
     return len(lines)
 
-
-    
         
 def _short_tid(tid: int, n: int = 6) -> str:
     s = str(tid)
