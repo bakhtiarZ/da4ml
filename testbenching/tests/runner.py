@@ -10,7 +10,7 @@ TESTS_DIR = Path(__file__).parent / "tests"
 
 def create_verilog_sources(dir):
     from da4ml.graph_ir.lr_graph import build_lr_graph_from_model, lr_graph_to_hardware
-    from da4ml.graph_ir.scheduling import DataSchedule, DataScheduler, dense_schedule, input_dense_schedule_requirement, minimum_output_shape_for_dense, minimum_input_shape_for_dense, dense_rebuilder
+    from da4ml.graph_ir.schedules.scheduling import DataSchedule, DataScheduler, dense_schedule, input_dense_schedule_requirement, minimum_output_shape_for_dense, minimum_input_shape_for_dense, dense_rebuilder
     from hgq.layers import QDense
     from hgq.config import QuantizerConfig
     import keras

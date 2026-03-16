@@ -1,8 +1,5 @@
 from dataclasses import dataclass
-from abc import ABC, abstractmethod
-
 import keras
-
 from hgq.layers import QAdd
 from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
@@ -10,27 +7,15 @@ from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 from hgq.config import QuantizerConfig
 from .util import OpRepr
 
-# class CustomLogic(ABC):
-
-#     @abstractmethod
-#     def __init__(self, opr: OpRepr):
-#         pass
-
-#     @abstractmethod
-#     def min_inp_shape(self) -> tuple[int, ...]:
-#         pass
-
-#     @abstractmethod
-#     def min_output_shape(self) -> tuple[int, ...]:
-#         pass
-
 class CustomLogic:
     pass
 
-@dataclass
 class PureLogic:
-    empty_logic: bool = True  # marker type
 
+    def __init__(self, opr: OpRepr):
+        self.opr = opr
+    def __repr__(self) -> str:
+        return f"PureLogic(opr={self.opr})"
 
 @dataclass
 class RoutingLogic:
@@ -74,6 +59,11 @@ class PortConnection:
 class QSumLogic(CustomLogic):
     def __init__(self, opr: OpRepr):
         self.opr = opr
+        self.axes = opr.operation.axes
+
+    def __repr__(self) -> str:
+        return f"QSumLogic(opr={self.opr.operation.name}, axes={self.axes})"
+    
 
 class QSumGen():
     def __init__(self, data_in: HWInterface, data_out: HWInterface, input_sematic_shape, input_streaming_shape, axis):

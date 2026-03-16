@@ -9,7 +9,7 @@ from hgq.config import QuantizerConfig
 from da4ml.codegen.rtl.rtl_model import get_io_kifs
 
 from da4ml.graph_ir.op_graph import *
-from da4ml.graph_ir.scheduling import *
+from da4ml.graph_ir.schedules.scheduling import *
 from da4ml.graph_ir.util import *
 # from da4ml.graph_ir.lr_graph_orig import *
 # from da4ml.graph_ir.lr_graph_viz_orig import visualize_lr_graph
@@ -124,6 +124,13 @@ def simple_qsum():
     m = keras.Model(i, s)
     return m
 
+def m_with_qsum():
+    i = keras.Input((3,2))
+    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=0, scale=1, keepdims=False)(i) # 1, 2
+    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(s) # 1, 1
+    m = keras.Model(i, d0)
+    return m
+
 
 def test_build_lrgraph_from_model(model):
     lr_g = build_lr_graph_from_model(model)
@@ -147,5 +154,5 @@ def test_write_rtl_from_lrgraph(model):
 # test_write_rtl_from_lrgraph()
 
 # test_write_rtl_from_lrgraph(simple_qsum())
-test_build_lrgraph_from_model(simple_qsum())
+test_build_lrgraph_from_model(m_with_qsum())
 

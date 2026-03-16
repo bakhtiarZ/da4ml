@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Type
 import keras
 
-from .scheduling import DataSchedule, DataScheduler, _SCHEDULE_REGISTRY
+from .schedules.scheduling import DataSchedule, DataScheduler, _SCHEDULE_REGISTRY
 
 @dataclass
 class OpRepr:

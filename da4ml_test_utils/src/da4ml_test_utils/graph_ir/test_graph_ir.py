@@ -2,8 +2,8 @@ import keras
 import tensorflow as tf
 
 from da4ml.graph_ir.op_graph import *
-from da4ml.graph_ir.scheduling import *
-from da4ml.graph_ir.scheduling import _SCHEDULE_REGISTRY
+from da4ml.graph_ir.schedules.scheduling import *
+from da4ml.graph_ir.schedules.scheduling import _SCHEDULE_REGISTRY
 
 
 def test_build_graph_from_model():

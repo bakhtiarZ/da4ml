@@ -16,7 +16,7 @@ from da4ml.converter import trace_model
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 
 from .hardware_types import PortConnection, HWInterface, PureLogic, CustomLogic, RoutingLogic
-from .scheduling import DataSchedule, _SCHEDULE_REGISTRY
+from .schedules.scheduling import DataSchedule, _SCHEDULE_REGISTRY
 from .util import _strip_batch_and_ensure_ints, parse_model, OpRepr, _flatten_ops, short_tid, _short_tid, _strip_batch
 
 
@@ -116,7 +116,7 @@ def create_logic_impl_from_oprepr(
     if opr.operation.__class__ is keras.layers.InputLayer:
         out_no_batch_int = _strip_batch_and_ensure_ints(opr.produces[0].shape)
         shp = out_no_batch_int
-        return PureLogic(), shp, shp
+        return PureLogic(opr=opr), shp, shp
     
     elif issubclass(schedule.hardware_type, CustomLogic):
         logic_impl = schedule.hardware_type(opr)
@@ -290,7 +290,7 @@ def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
         op_id=out_node_id,
         operation=None,
         op_repr=None,
-        logic_impl=PureLogic(),
+        logic_impl=PureLogic(opr=None),
         input_tids=list(output_tids),
         output_tids=[],
         input_shapes=input_shapes,
@@ -501,7 +501,9 @@ def lr_to_dot(lr: LRGraph) -> str:
         rows.append(f'<TR><TD ALIGN="left">op: {esc(op_type)}</TD></TR>')
         if op_name:
             rows.append(f'<TR><TD ALIGN="left">name: {esc(op_name)}</TD></TR>')
-
+        if issubclass(type(n.logic_impl), CustomLogic):
+            rows.append(f'<TR><TD ALIGN="left">logic: {esc(n.logic_impl)}</TD></TR>')
+         
         rows.append('<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Inputs</B></TD></TR>')
         if n.input_tids:
             for tid in n.input_tids:
