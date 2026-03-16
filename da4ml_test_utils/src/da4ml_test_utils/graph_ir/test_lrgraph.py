@@ -10,6 +10,7 @@ from da4ml.codegen.rtl.rtl_model import get_io_kifs
 
 from da4ml.graph_ir.op_graph import *
 from da4ml.graph_ir.scheduling import *
+from da4ml.graph_ir.util import *
 # from da4ml.graph_ir.lr_graph_orig import *
 # from da4ml.graph_ir.lr_graph_viz_orig import visualize_lr_graph
 

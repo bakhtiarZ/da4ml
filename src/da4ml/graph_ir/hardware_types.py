@@ -8,22 +8,24 @@ from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 from hgq.config import QuantizerConfig
-from .lr_graph import LogicNode, OpRepr
+from .util import OpRepr
 
-class CustomLogic(ABC):
+# class CustomLogic(ABC):
 
-    @abstractmethod
-    def __init__(self, opr: OpRepr):
-        pass
+#     @abstractmethod
+#     def __init__(self, opr: OpRepr):
+#         pass
 
-    @abstractmethod
-    def min_inp_shape(self) -> tuple[int, ...]:
-        pass
+#     @abstractmethod
+#     def min_inp_shape(self) -> tuple[int, ...]:
+#         pass
 
-    @abstractmethod
-    def min_output_shape(self) -> tuple[int, ...]:
-        pass
+#     @abstractmethod
+#     def min_output_shape(self) -> tuple[int, ...]:
+#         pass
 
+class CustomLogic:
+    pass
 
 @dataclass
 class PureLogic:
@@ -37,7 +39,7 @@ class RoutingLogic:
 
 
 class HWInterface:
-    def __init__(self, node: LogicNode):
+    def __init__(self, node):
         self.node = node
         self.comb_logic = node.logic_impl
         self.input_kif, self.output_kif = get_io_kifs(self.comb_logic)
@@ -71,9 +73,7 @@ class PortConnection:
 
 class QSumLogic(CustomLogic):
     def __init__(self, opr: OpRepr):
-        
         self.opr = opr
-        self.semantic_inp_shape = opr.requires
 
 class QSumGen():
     def __init__(self, data_in: HWInterface, data_out: HWInterface, input_sematic_shape, input_streaming_shape, axis):
@@ -100,8 +100,7 @@ class QSumGen():
         self.internal_adder = comb_trace(i,o)
     
     def _create_preamble(self):
-        module_definition = "" \ 
-        "module QSum #(" \
+        module_definition = " module QSum #(" \
         # f"  ACCUM_COUNT = {self.accum_count},"
         # f"  IN_WIDTH = {self.input_bitwidth * self.input_item_size}"
         # f"  OUT_WIDTH = {self.output_bitwidth * self.output_item_size}"
@@ -123,7 +122,6 @@ class QSumGen():
         lines = ""
         "\n\n" \
         f"localparam int COUNT_W = {self.accum_count if self.accum_count > 1 else 1};\n" \
-        f"local param logic [{}]"
         "endmodule"
 
         

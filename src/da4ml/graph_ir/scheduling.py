@@ -141,12 +141,18 @@ def conv1d_extract_windows(
 def input_qsum_requirement(shape):
     return len(shape) > 0 and not all([axis is None for axis in shape])
 
-def minimum_output_shape_for_qsum(output_shape, axis):
+def minimum_output_shape_for_qsum(output_shape, axes):
+    axis = axes[0] # for now we only support single axis qsum scheduling, so take the first element of the axis list
     new_output_shape = output_shape[:axis] + (1,) + output_shape[axis+1:]
     return new_output_shape
 
-def minimum_input_shape_for_qsum(input_shape, axis):
-    return input_shape[axis] is not None and input_shape[axis] > 0
+def minimum_input_shape_for_qsum(input_shape, axes):
+    assert len(axes) == 1, "Currently only support single axis qsum scheduling"
+    axis = axes[0]
+    if input_shape[axis] is not None and input_shape[axis] > 0:
+        return input_shape[:axis] + (1,) + input_shape[axis+1:]
+    else:
+        raise ValueError(f"Input shape {input_shape} does not meet minimum shape requirements for qsum scheduling on axis {axis}")
 
 def qsum_schedule(x, axis):
     # tensor --> split on that axis, sum clock by clock...

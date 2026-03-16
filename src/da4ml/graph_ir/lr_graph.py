@@ -58,6 +58,7 @@ class LRGraph:
 def _min_shapes_for_op(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
+    **kwargs: Any,
 ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
     """
     Decide minimal input/output shapes for this op, including batch=1.
@@ -73,8 +74,8 @@ def _min_shapes_for_op(
     if schedule is None:
         return in_no_batch_int, out_no_batch_int
 
-    min_in_no_batch = schedule.minimum_input_shape(in_no_batch_int)
-    min_out_no_batch = schedule.minimum_output_shape(out_no_batch_int)
+    min_in_no_batch = schedule.minimum_input_shape(in_no_batch_int, **kwargs)
+    min_out_no_batch = schedule.minimum_output_shape(out_no_batch_int, **kwargs)
 
     min_in = tuple(min_in_no_batch)
     min_out = tuple(min_out_no_batch)
@@ -85,12 +86,7 @@ def create_comb_logic_from_oprepr(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
 ) -> Tuple[CombLogic | PureLogic, Tuple[int, ...], Tuple[int, ...]]:
-    # InputLayer special-case
-    if opr.operation.__class__ is keras.layers.InputLayer:
-        out_no_batch_int = _strip_batch_and_ensure_ints(opr.produces[0].shape)
-        shp = out_no_batch_int
-        return PureLogic(), shp, shp
-
+    
     min_in_shape, min_out_shape = _min_shapes_for_op(opr, schedule)
 
     # Build a minimal model around this operation
@@ -121,13 +117,15 @@ def create_logic_impl_from_oprepr(
         out_no_batch_int = _strip_batch_and_ensure_ints(opr.produces[0].shape)
         shp = out_no_batch_int
         return PureLogic(), shp, shp
-    elif schedule.hardware_type == CustomLogic:
+    
+    elif issubclass(schedule.hardware_type, CustomLogic):
         logic_impl = schedule.hardware_type(opr)
-        min_in_shape = logic_impl.min_inp_shape()
-        min_out_shape = logic_impl.min_out_shape()
+        min_in_shape, min_out_shape = _min_shapes_for_op(opr, schedule, axes=opr.operation.axes)
         return logic_impl, min_in_shape, min_out_shape
+    
     elif schedule.hardware_type == CombLogic:
         return create_comb_logic_from_oprepr(opr, schedule)
+    
     else:
         raise AssertionError(f"Hardware type is not recognised opr class: {opr.operation.__class__}, schedule hardware type: {schedule.hardware_type}")
         
