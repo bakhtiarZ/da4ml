@@ -4,9 +4,11 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from hgq.layers import QDense
+from hgq.layers import QDense, QSum
 from da4ml.cmvm.types import CombLogic
 from da4ml.graph_ir.hardware_types import QSumLogic
+
+
 @dataclass
 class DataSchedule():
     shape_req: Callable[[tuple], bool]

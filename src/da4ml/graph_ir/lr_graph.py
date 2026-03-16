@@ -8,8 +8,6 @@ import shutil
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 
 import keras
-from matplotlib import lines
-import numpy as np
 from pathlib import Path
 
 from da4ml.cmvm.types import CombLogic
@@ -17,44 +15,9 @@ from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 
-from .hardware_types import PortConnection, HWInterface, PureLogic
+from .hardware_types import PortConnection, HWInterface, PureLogic, CustomLogic, RoutingLogic
 from .scheduling import DataSchedule, _SCHEDULE_REGISTRY
-
-
-@dataclass
-class OpRepr:
-    operation: keras.Operation
-    args: list
-    kwargs: dict
-    produces: Tuple[keras.KerasTensor, ...]
-    requires: Tuple[keras.KerasTensor, ...]
-
-
-def parse_model(model: keras.Model) -> List[List[OpRepr]]:
-    if isinstance(model, keras.Sequential):
-        model = model._functional
-
-    operators: Dict[int, List[OpRepr]] = {}
-    for depth, nodes in model._nodes_by_depth.items():
-        _oprs: List[OpRepr] = []
-        for node in nodes:
-            assert isinstance(node.operation, keras.Operation)
-            opr = OpRepr(
-                operation=node.operation,
-                args=node.arguments.args,
-                kwargs=node.arguments.kwargs,
-                produces=tuple(node.outputs),
-                requires=tuple(node.arguments.keras_tensors),
-            )
-            _oprs.append(opr)
-        operators[depth] = _oprs
-    return [operators[i] for i in range(max(operators.keys()), -1, -1)]
-
-
-@dataclass
-class RoutingLogic:
-    buffer_type: str = "fifo"
-    buffer_shape: tuple[int, int] = (-1, -1)
+from .util import _strip_batch_and_ensure_ints, parse_model, OpRepr, _flatten_ops, short_tid, _short_tid, _strip_batch
 
 
 @dataclass
@@ -68,13 +31,14 @@ class RoutingEdge:
     to_nodes: Set[int] = field(default_factory=set)
     to_compute_shapes: Dict[int, Tuple[int, ...]] = field(default_factory=dict)
 
+
 @dataclass
 class LogicNode:
     op_id: int
     operation: Optional[keras.Operation]
     op_repr: Optional[OpRepr]
 
-    logic_impl: CombLogic | PureLogic
+    logic_impl: CombLogic | CustomLogic | PureLogic
 
     input_tids: List[int]
     output_tids: List[int]
@@ -90,39 +54,6 @@ class LRGraph:
     model_input_tids: List[int] = field(default_factory=list)
     model_output_tids: List[int] = field(default_factory=list)
 
-
-def _strip_batch(shape: Any) -> Tuple[int, ...]:
-    """
-    Convert KerasTensor shape into tuple[int,...] with batch removed.
-    Typically KerasTensor.shape looks like (None, d1, d2, ...)
-    """
-    if shape is None:
-        return tuple()
-    # shape may be TensorShape-like; tuple() makes it concrete
-    shp = tuple(shape)
-    if len(shp) == 0:
-        return tuple()
-    if shp[0] is None:
-        shp = shp[1:]
-    # Ensure all remaining dims are ints or None; keep None if present
-    return tuple(shp)
-
-
-def _ensure_tuple_ints(shape: Tuple[Any, ...]) -> Tuple[int, ...]:
-    """
-    Best-effort conversion to tuple[int,...] where possible.
-    If a dim is None, we keep None out by raising (because your schedules assume ints).
-    """
-    out: List[int] = []
-    for d in shape:
-        if d is None:
-            raise ValueError(f"Encountered dynamic/None dim in shape {shape}. "
-                             f"Your scheduling/min-shape logic assumes static ints.")
-        out.append(int(d))
-    return tuple(out)
-
-def _strip_batch_and_ensure_ints(shape: Any) -> Tuple[int, ...]: 
-    return _ensure_tuple_ints(_strip_batch(shape))
 
 def _min_shapes_for_op(
     opr: OpRepr,
@@ -182,13 +113,24 @@ def create_comb_logic_from_oprepr(
 
     return logic, min_in_shape, min_out_shape
 
-
-def _flatten_ops(parsed: List[List[OpRepr]]) -> List[OpRepr]:
-    ops: List[OpRepr] = []
-    for group in parsed:
-        ops.extend(group)
-    return ops
-
+def create_logic_impl_from_oprepr(
+    opr: OpRepr,
+    schedule: Optional[DataSchedule],
+) -> CombLogic | PureLogic | CustomLogic:
+    if opr.operation.__class__ is keras.layers.InputLayer:
+        out_no_batch_int = _strip_batch_and_ensure_ints(opr.produces[0].shape)
+        shp = out_no_batch_int
+        return PureLogic(), shp, shp
+    elif schedule.hardware_type == CustomLogic:
+        logic_impl = schedule.hardware_type(opr)
+        min_in_shape = logic_impl.min_inp_shape()
+        min_out_shape = logic_impl.min_out_shape()
+        return logic_impl, min_in_shape, min_out_shape
+    elif schedule.hardware_type == CombLogic:
+        return create_comb_logic_from_oprepr(opr, schedule)
+    else:
+        raise AssertionError(f"Hardware type is not recognised opr class: {opr.operation.__class__}, schedule hardware type: {schedule.hardware_type}")
+        
 
 def build_lr_graph_from_parsed(
     parsed: List[List[OpRepr]],
@@ -238,7 +180,7 @@ def build_lr_graph_from_parsed(
         in_tids = [id(t) for t in in_ts]
         out_tids = [id(t) for t in out_ts]
 
-        logic_impl, min_in_shape, min_out_shape = create_comb_logic_from_oprepr(opr, schedule)
+        logic_impl, min_in_shape, min_out_shape = create_logic_impl_from_oprepr(opr, schedule)
 
         node = LogicNode(
             op_id=op_id,
@@ -357,13 +299,6 @@ def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
         output_shapes={},
     )
     return out_node_id
-
-def get_bitwidth_from_cl(cs: CombLogic):
-    inp_kif, output_kif = get_io_kifs(cs)
-    inp_bitwidth = sum(np.max(arr) for arr in inp_kif)
-    output_bitwidth = sum(np.max(arr) for arr in output_kif)
-    return int(inp_bitwidth), int(output_bitwidth)
-
 
 def create_logic_node_hw(node_id, node, project_dir):
     lines = []
@@ -509,16 +444,6 @@ def lr_graph_to_hardware(lr: LRGraph, project_dir: str | Path, debug=False) -> i
     return len(lines)
 
         
-def _short_tid(tid: int, n: int = 6) -> str:
-    s = str(tid)
-    return s[-n:] if len(s) > n else s
-
-def short_tid(tid: int, n: int = 6) -> str:
-    return _short_tid(tid, n)
-
-def _escape(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"')
-
 def lr_to_dot(lr: LRGraph) -> str:
     """
     Graphviz DOT with:

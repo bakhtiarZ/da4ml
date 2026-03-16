@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
+
 import keras
 
 from hgq.layers import QAdd
@@ -6,14 +8,32 @@ from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 from hgq.config import QuantizerConfig
+from .lr_graph import LogicNode, OpRepr
 
-from .lr_graph import LogicNode
+class CustomLogic(ABC):
 
+    @abstractmethod
+    def __init__(self, opr: OpRepr):
+        pass
+
+    @abstractmethod
+    def min_inp_shape(self) -> tuple[int, ...]:
+        pass
+
+    @abstractmethod
+    def min_output_shape(self) -> tuple[int, ...]:
+        pass
 
 
 @dataclass
 class PureLogic:
     empty_logic: bool = True  # marker type
+
+
+@dataclass
+class RoutingLogic:
+    buffer_type: str = "fifo"
+    buffer_shape: tuple[int, int] = (-1, -1)
 
 
 class HWInterface:
@@ -48,7 +68,14 @@ class PortConnection:
     def __str__(self):
         return f"data={self.data}, valid={self.valid}, ready={self.ready}"
 
-class QSumLogic: # will be used to generate a 'Sum' hardware, this means it needs information about the data in, data out, and when to reset its internal sum
+
+class QSumLogic(CustomLogic):
+    def __init__(self, opr: OpRepr):
+        
+        self.opr = opr
+        self.semantic_inp_shape = opr.requires
+
+class QSumGen():
     def __init__(self, data_in: HWInterface, data_out: HWInterface, input_sematic_shape, input_streaming_shape, axis):
         self.input_bitwidth, self.input_item_size = data_in.get_input_bw_is()
         self.output_bitwidth, self.output_item_size = data_out.get_output_bw_is()
@@ -95,45 +122,8 @@ class QSumLogic: # will be used to generate a 'Sum' hardware, this means it need
         # define and connect control logic, maybe use a state machine
         lines = ""
         "\n\n" \
-        "localparam int ACCUM_COUNT = {self.accum_count};\n" \
-        f"logic [{self.output_bitwidth * self.output_item_size - 1}:0] sum_reg;\n" \
-        f"logic [$clog2(ACCUM_COUNT):0] count_reg;\n" \
-        f"logic [{self.output_bitwidth * self.output_item_size - 1}:0] adder_result;\n" \
-        f"// internal adder instance\n" \
-        f"QAdd internal_adder (\n" \
-        f"  .i0({self.data_in_interface.data[0]}),\n" \
-        f"  .i1(sum_reg),\n" \
-        f"  .o(adder_result)\n" \
-        f");\n" \
-        f"// control logic\n" \
-        f"logic accept_input; assign accept_input = {self.data_in_interface.valid} && {self.data_in_interface.ready};\n" \
-        f"logic output_accepted; assign output_accepted = {self.data_out_interface.valid} && {self.data_out_interface.ready};\n" \
-        f"assign {self.data_in_interface.ready} = !{self.data_out_interface.valid};\n" \
-        f"assign last_input_of_group = accept_input && (count_reg == ACCUM_COUNT - 1);\n" \
-        f"always_ff @(posedge clk) begin\n" \
-        f"  if (rst) begin\n" \
-        f"    sum_reg <= 0;\n" \
-        f"    count_reg <= 0;\n" \
-        f"    {self.data_out_interface.valid} <= 0;\n" \
-        f"    {self.data_out_interface.data[0]} <= 0;\n" \
-        f"  end else begin\n" \
-        f"  if (accept_output) begin\n" \
-        f"    {self.data_out_interface.valid} <= 0;\n" \
-        f"    count_reg <= 0;\n" \
-        f"    accum_reg <= 0;\n" \
-        f"  end\n" \
-        f"  if (accept_input) begin\n" \
-        f"      if (last_input_of_group) begin\n" \
-        f"          sum_reg <= adder_result;\n" \
-        f"          {self.data_out_interface.valid} <= 1;\n" \
-        f"          count_reg <= count_reg;\n" \
-        f"      end else begin\n" \
-        f"          sum_reg <= adder_result;\n" \
-        f"          count_reg <= count_reg + 1;\n" \
-        f"      end\n" \
-        f"  end\n" \
-        f"  end\n" \
-        "end\n\n" \
+        f"localparam int COUNT_W = {self.accum_count if self.accum_count > 1 else 1};\n" \
+        f"local param logic [{}]"
         "endmodule"
 
         
