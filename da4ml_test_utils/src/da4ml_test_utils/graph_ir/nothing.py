@@ -1,6 +1,9 @@
 import keras
 
-from hgq.layers import QDense
+from hgq.layers import QDense, QAdd
+from da4ml.trace import FixedVariableArrayInput, comb_trace
+from da4ml.converter import trace_model
+from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 from hgq.config import QuantizerConfig
 
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
@@ -28,4 +31,21 @@ def quints():
     import pdb; pdb.set_trace()
     print("asd")
 
-quints()
+def create_qadd():
+    i0 = keras.Input(shape=(1,))
+    i1 = keras.Input(shape=(1,))
+    o = QAdd(iq_confs=[QuantizerConfig(heterogeneous_axis=()), QuantizerConfig(heterogeneous_axis=())])([i0, i1])
+    model = keras.Model(inputs=[i0,i1], outputs=o)
+    i,o = trace_model(model)
+    cl = comb_trace(i,o)
+    instance_name = f"adder_for_qsum_node"
+    project_dir = f"/homes/bm920/workspace/da4ml/.tmp/adder_for_qsum_node_project"
+    rtl_model = RTLModel(
+        solution=cl,
+        prj_name=f"mod_{instance_name}",
+        path=project_dir,
+        flavor="verilog",
+    )
+    rtl_model.write()
+    
+create_qadd()

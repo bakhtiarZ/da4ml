@@ -1,6 +1,12 @@
 from os import getenv
 from pathlib import Path
 from cocotb_tools.runner import get_runner
+import keras
+
+from hgq.layers import QDense, QAdd, QSum
+from hgq.config import QuantizerConfig
+
+from da4ml_test_utils.src.da4ml_test_utils.graph_ir.test_lrgraph import test_build_lrgraph_from_model
 
 
 HERE = Path(__file__).resolve().parent
@@ -10,12 +16,10 @@ TESTS_DIR = HERE / "tests"
 
 def main():
     sim = getenv("SIM", "verilator")
-
-    verilog_sources = [
-        str(RTL_DIR / "qsum.sv"),
-    ]
-
-    print("Verilog sources:", verilog_sources)
+    test_qsum_gen()
+    verilog_sources = sorted(map(str, RTL_DIR.rglob("*.v")))
+    verilog_sources += sorted(map(str, RTL_DIR.rglob("*.sv")))
+    print("Verilog sources:", verilog_sources, "\n")  # debug
 
     runner = get_runner(sim)
 

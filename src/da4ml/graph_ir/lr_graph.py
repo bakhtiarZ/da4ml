@@ -45,6 +45,7 @@ class LogicNode:
 
     input_shapes: Dict[int, Tuple[int, ...]] = field(default_factory=dict)
     output_shapes: Dict[int, Tuple[int, ...]] = field(default_factory=dict)
+    logic_wrapper: Optional[CustomLogic] = None
 
 
 @dataclass
@@ -299,6 +300,17 @@ def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
     return out_node_id
 
 def create_logic_node_hw(node_id, node, project_dir):
+    if (type(node.logic_impl) == CombLogic):
+        return create_comb_logic_node_hw(node_id, node, project_dir)
+    elif (type(node.logic_impl) == CustomLogic):
+        lines, input_port_conns, output_port_conns = node.logic_impl.generate_hw(project_dir=project_dir, node_id=node_id)
+        return lines, input_port_conns, output_port_conns
+    elif (type(node.logic_impl) == PureLogic):
+        print("PureLogic node, no hardware to generate, what happened here? is this supposed to be called?")
+    else:
+        raise AssertionError(f"Unknown logic_impl type {type(node.logic_impl)} for node_id {node_id}")
+
+def create_comb_logic_node_hw(node_id, node, project_dir):
     lines = []
     lines.append(f"// Logic node {node_id} for operation {node.operation}")
     hw_interface = HWInterface(node)

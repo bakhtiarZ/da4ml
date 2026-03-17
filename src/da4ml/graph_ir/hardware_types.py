@@ -1,17 +1,31 @@
+from abc import ABC, abstractmethod
+
 from dataclasses import dataclass
+import math
+import math
+from platform import node
 import keras
+import numpy as np
+
 from hgq.layers import QAdd
 from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
 from hgq.config import QuantizerConfig
-from .util import OpRepr
+from .util import OpRepr, _strip_batch_and_ensure_ints
 
-class CustomLogic:
-    pass
+class CustomLogic(ABC):
+    
+    @abstractmethod
+    def __init__(self, node):
+        self.node = node
+    
+    @abstractmethod
+    def generate_hw(self, project_dir, node_id):
+        pass
+        
 
 class PureLogic:
-
     def __init__(self, opr: OpRepr):
         self.opr = opr
     def __repr__(self) -> str:
@@ -57,64 +71,197 @@ class PortConnection:
 
 
 class QSumLogic(CustomLogic):
-    def __init__(self, opr: OpRepr):
+    def __init__(self, opr):
         self.opr = opr
         self.axes = opr.operation.axes
-
+        
     def __repr__(self) -> str:
         return f"QSumLogic(opr={self.opr.operation.name}, axes={self.axes})"
     
+    def generate_hw(self, project_dir, node) -> str:
+        self.node = node
+        self.node_id = node.op_id
+        self.qsumgen = QSumGen(self.node, project_dir, self.node_id)
+        self.qsumgen.configure()
+        return self.qsumgen.write_hw(project_dir)
+    
 
 class QSumGen():
-    def __init__(self, data_in: HWInterface, data_out: HWInterface, input_sematic_shape, input_streaming_shape, axis):
-        self.input_bitwidth, self.input_item_size = data_in.get_input_bw_is()
-        self.output_bitwidth, self.output_item_size = data_out.get_output_bw_is()
-        self.data_in_interface = PortConnection(data = (f"data_in_{data_in.node.op_id}", self.input_bitwidth), valid = f"data_in_valid_{data_in.node.op_id}", ready = f"data_in_ready_{data_in.node.op_id}")
-        self.data_out_interface = PortConnection(data = (f"data_out_{data_out.node.op_id}", self.output_bitwidth), valid = f"data_out_valid_{data_out.node.op_id}", ready = f"data_out_ready_{data_out.node.op_id}")
+    def __init__(self, node, project_dir, node_id):
+        self.node = node
+        self.project_dir = project_dir
+        self.node_id = node_id
         
-        ## assume the axis is the one being streamed over otherwise it gets very complicated
-        self.input_sematic_shape = input_sematic_shape
-        self.input_streaming_shape = input_streaming_shape
-        self.axis = axis
+    def configure(self):
+        self._create_internal_adder(self.node)
+        self.input_kif, self.output_kif = get_io_kifs(self.internal_adder)
+        self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
+        self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
+        self.input_item_size = self.node.input_shapes[self.node.input_tids[0]][-1] 
+        self.output_item_size = self.node.output_shapes[self.node.output_tids[0]][-1]
+        self.axes = self.node.operation.axes
+        semantic_input_shape = _strip_batch_and_ensure_ints(self.node.op_repr.requires[0].shape)
+        streaming_input_shape = self.node.input_shapes[self.node.input_tids[0]]
+        self.accum_count = int(semantic_input_shape[self.axes[0]] / streaming_input_shape[self.axes[0]])
+        semantic_output_shape = _strip_batch_and_ensure_ints(self.node.op_repr.produces[0].shape)
+        streaming_output_shape = self.node.output_shapes[self.node.output_tids[0]]
+        print(f"\n\n DEBUG semantic_input_shape: {semantic_input_shape}, semantic_output_shape: {semantic_output_shape}\n\n {streaming_input_shape} {streaming_output_shape}\n\n")
+        assert semantic_output_shape[self.axes[0]] == 1 and streaming_output_shape[self.axes[0]] == 1, f"Currently only support summing to a single value along the reduction axis, but got semantic_output_shape: {semantic_output_shape} and streaming_output_shape: {streaming_output_shape}"
+        self.accum_count = int(semantic_input_shape[self.axes[0]] / streaming_input_shape[self.axes[0]])    
         
-        self.accum_count = int(self.input_sematic_shape[axis]) / int(self.input_streaming_shape[axis])
-        # calculate when to reset the register, and logic for asserting data in and data out valid ready etc
-        
-    def _create_internal_adder(self):
+        self.module_port_names = {
+            "clk": "clk",
+            "rst": "rst",
+            "data_in": f"data_in_{self.node_id}",
+            "in_valid": f"in_valid_{self.node_id}",
+            "in_ready": f"in_ready_{self.node_id}",
+            "data_out": f"data_out_{self.node_id}",
+            "out_valid": f"out_valid_{self.node_id}",
+            "out_ready": f"out_ready_{self.node_id}"
+        }
+             
+    def _create_internal_adder(self, node):
         # this will be responsible for adding 2 values that are the same quantisation
+        self.input_streaming_shape = node.input_shapes[node.input_tids[0]]
         i0 = keras.Input(shape=self.input_streaming_shape)
         i1 = keras.Input(shape=self.input_streaming_shape)
-        o = QAdd(iq_conf=QuantizerConfig(heterogeneous_axis=()))([i0, i1])
+        o = QAdd(iq_confs=[QuantizerConfig(heterogeneous_axis=()), QuantizerConfig(heterogeneous_axis=())])([i0, i1])
         model = keras.Model(inputs=[i0,i1], outputs=o)
         i,o = trace_model(model)
         self.internal_adder = comb_trace(i,o)
     
     def _create_preamble(self):
-        module_definition = " module QSum #(" \
-        # f"  ACCUM_COUNT = {self.accum_count},"
-        # f"  IN_WIDTH = {self.input_bitwidth * self.input_item_size}"
-        # f"  OUT_WIDTH = {self.output_bitwidth * self.output_item_size}"
-        ") ("
-        f"  input logic clk,"
-        f"  input logic rst,"
-        f"  input logic [{self.input_bitwidth * self.input_item_size - 1}:0] {self.data_in_interface.data[0]},"
-        f"  input logic {self.data_in_interface.valid},"
-        f"  output logic {self.data_in_interface.ready},"
-        f"  output logic [{self.output_bitwidth * self.output_item_size - 1}:0] {self.data_out_interface.data[0]},"
-        f"  output logic {self.data_out_interface.valid},"
-        f"  input logic {self.data_out_interface.ready}"
-        ");"
+        module_definition = (" module QSum #() (\n" 
+        f"    input logic clk,\n"
+        f"    input logic rst,\n"
+        f"    input logic [{self.input_bitwidth * self.input_item_size - 1}:0] {self.module_port_names['data_in']},\n"
+        f"    input logic {self.module_port_names['in_valid']},\n"
+        f"    output logic {self.module_port_names['in_ready']},\n"
+        f"    output logic [{self.output_bitwidth * self.output_item_size - 1}:0] {self.module_port_names['data_out']},\n"
+        f"    output logic {self.module_port_names['out_valid']},\n"
+        f"    input logic {self.module_port_names['out_ready']}\n"
+        ");\n\n")
         return module_definition
     
-    def _write_top_level(self):
-        preamble = self._create_preamble()
-        # define and connect control logic, maybe use a state machine
-        lines = ""
-        "\n\n" \
-        f"localparam int COUNT_W = {self.accum_count if self.accum_count > 1 else 1};\n" \
-        "endmodule"
+    def _write_body_of_module(self):
+        adder_module_name = self.adder_instance_name
+        print(f"\n\n DEBUG accum_count: {self.accum_count}, input_bitwidth: {self.input_bitwidth}, input_item_size: {self.input_item_size}, output_bitwidth: {self.output_bitwidth}, output_item_size: {self.output_item_size}\n\n`")
+        count_w = 1 if self.accum_count <= 1 else math.ceil(math.log2(self.accum_count + 1))
+        input_width = self.input_bitwidth * self.input_item_size
+        output_width = self.output_bitwidth * self.output_item_size
+        lines = (
+            f"    localparam logic [{count_w-1}:0] COUNT_MINUS_ONE = {self.accum_count - 1};\n"
+            f"    localparam logic [{count_w-1}:0] COUNT_VALUE     = {self.accum_count};\n"
+            f"\n" \
+            f"    logic [{output_width - 1}:0] sum_reg;\n"
+            f"    logic [{count_w-1}:0] count_reg;\n"
+            f"    logic full_reg;\n"
+            f"\n"
+            f"    logic [{output_width - 1}:0] adder_result;\n"
+            f"    logic accept_input;\n"
+            f"    logic accept_output;\n"
+            f"    logic last_input;\n"
+            f"\n"
+            f"    logic [{input_width + output_width - 1}:0] packed_operands; assign packed_operands = {{data_in, sum_reg}};\n"
+            f"    {adder_module_name} #(\n"
+            f"    ) QAdd (\n"
+            f"        .model_in(packed_operands),\n"
+            f"        .model_out(adder_result)\n"
+            f"    );\n"
+            f"\n"
+            f"    assign in_ready      = !full_reg;\n"
+            f"    assign out_valid     = full_reg;\n"
+            f"    assign data_out      = sum_reg;\n"
+            f"\n"
+            f"    assign accept_input  = in_valid && in_ready;\n"
+            f"    assign accept_output = out_valid && out_ready;\n"
+            f"    assign last_input    = (count_reg == COUNT_MINUS_ONE);\n"
+            f"\n"
+            f"    always_ff @(posedge clk) begin\n"
+            f"        if (rst) begin\n"
+            f"            sum_reg   <= '0;\n"
+            f"            count_reg <= '0;\n"
+            f"            full_reg  <= 1'b0;\n"
+            f"        end else begin\n"
+            f"            if (accept_output) begin\n"
+            f"                sum_reg   <= '0;\n"
+            f"                count_reg <= '0;\n"
+            f"                full_reg  <= 1'b0;\n"
+            f"            end else if (accept_input) begin\n"
+            f"                sum_reg <= adder_result;\n"
+            f"\n"
+            f"                if (last_input) begin\n"
+            f"                    count_reg <= COUNT_VALUE;\n"
+            f"                    full_reg  <= 1'b1;\n"
+            f"                end else begin\n"
+            f"                    count_reg <= count_reg + 1'b1;\n"
+            f"                end\n"
+            f"            end\n"
+            f"        end\n"
+            f"    end\n"
+            f"\nendmodule\n"
+        )
 
-        
-    def write_hw(self, path):
+        return lines
+
+    def _write_module_file(self, project_dir):
+        # 1) write the internal adder
+        cl = self.internal_adder
+        self.adder_instance_name = f"adder_for_qsum_node_{self.node_id}"
+        rtl_model = RTLModel(
+            solution=cl,
+            prj_name=f"mod_{self.adder_instance_name}",
+            path=project_dir,
+            flavor="verilog",
+        )
+        rtl_model.write()
+        # 2) write the module itself
+        preamble = self._create_preamble()
+        body = self._write_body_of_module()
+        module_file_content = preamble + body
+        module_file_path = f"{project_dir}/qsum_module.sv"
+        with open(module_file_path, "w") as f:
+            f.write(module_file_content)
+        return module_file_path
+    
+    def _write_instance_decl(self):
+        # input port conns, output port conns, wiring and instance decl
+        lines = []
+        lines.append(f"    // Instance of QSum for node {self.node_id}\n")
+        input_port_conns = PortConnection(
+            data=(f"data_in_{self.node_id}", self.input_bitwidth * self.input_item_size),
+            valid=f"in_valid_{self.node_id}",
+            ready=f"in_ready_{self.node_id}"
+        )
+        input_port_decls = input_port_conns.get_intermediate_decls()
+        lines.append("\n    // Intermediate signals for input port\n")
+        lines.extend(input_port_decls)
+        output_port_conns = PortConnection(
+            data=(f"data_out_{self.node_id}", self.output_bitwidth * self.output_item_size),
+            valid=f"out_valid_{self.node_id}",
+            ready=f"out_ready_{self.node_id}"
+        )
+        output_port_decls = output_port_conns.get_intermediate_decls()
+        lines.append("\n    // Intermediate signals for output port\n")
+        lines.extend(output_port_decls)
+        lines.append("\n    // Instance declaration\n")
+        port_conns = (
+            f".clk(clk),\n"
+            f".rst(rst),\n"
+            f".{self.module_port_names['data_in']}(data_in_{self.node_id}),\n"
+            f".{self.module_port_names['in_valid']}(in_valid_{self.node_id}),\n"
+            f".{self.module_port_names['in_ready']}(in_ready_{self.node_id}),\n"
+            f".{self.module_port_names['data_out']}(data_out_{self.node_id}),\n"
+            f".{self.module_port_names['out_valid']}(out_valid_{self.node_id}),\n"
+            f".{self.module_port_names['out_ready']}(out_ready_{self.node_id})\n"
+        )
+        lines.append(f"QSum #( ) qsum_inst_{self.node_id} (\n{port_conns});\n")
+        instance_decl = "\n".join(lines)
+        return instance_decl, input_port_conns, output_port_conns
+    
+    def write_hw(self, project_dir):
         # should create the necessary internal files, then create a top level module, and write them all to the specified path
-        top_level_module = self._write_top_level()
+        # top_level_module = self._write_top_level()
+        module_file = self._write_module_file(project_dir)
+        instance_decl, input_port_conns, output_port_conns = self._write_instance_decl()
+        return module_file, instance_decl, input_port_conns, output_port_conns
