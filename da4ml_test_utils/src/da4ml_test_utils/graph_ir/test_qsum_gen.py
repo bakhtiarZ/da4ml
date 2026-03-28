@@ -47,7 +47,7 @@ def encode_to(
     i: np.ndarray|int,
     f: np.ndarray|int,
 ) -> np.ndarray:
-    return np.floor(x * 2.0**f).astype(int) % 2**int(k + i + f)
+    return np.floor(x * 2.0**f).astype(int) % 2**(k + i + f)
 
 def encode_to_d(
     x: np.ndarray,
@@ -79,50 +79,7 @@ def encode_to_d(
         return hex(accum)[2:]
     else:
         return accum
-# @pytest.fixture
-def simple_opgraph():
-    i = keras.Input((3,2))
-    # d0 = keras.layers.Dense(1) # da4ml doesn't support regular dense, only einsum and the hgq versions of dense
-    # d0 = keras.layers.EinsumDense('...f,fc->...c', output_shape=(1,), kernel_initializer='ones', bias_initializer='zeros')
-    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
-    # d0 = QDense(1, kernel_initializer='ones', bias_initializer='zeros')
-    out = d0(i)
-    m = keras.Model(i, out)
-    g = build_graph_from_model(m)
-    return g
 
-# @pytest.fixture
-def two_layer_opgraph():
-    i = keras.Input((3,2))
-    d0 = QDense(3, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
-    d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
-    out = d1(d0(i))
-    m = keras.Model(i, out)
-    g = build_graph_from_model(m)
-    return g
-
-def two_layer_model():
-    i = keras.Input((3,2))
-    d0 = QDense(3, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
-    d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
-    out = d1(d0(i))
-    m = keras.Model(i, out)
-    return m
-
-def split_join_model():
-    i = keras.Input((3,1))
-    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=False)(i)
-    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(i)
-    out = QAdd()([s,d0])
-    print(out)
-    m = keras.Model(i, out)
-    return m
-
-def simple_qsum():
-    i = keras.Input((3,1))
-    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=False)(i)
-    m = keras.Model(i, s)
-    return m
 
 def m_with_qsum():
     i = keras.Input((3,2))
@@ -131,13 +88,20 @@ def m_with_qsum():
     m = keras.Model(i, d0)
     return m
 
+def simple_qsum():
+    i = keras.Input((3,1))
+    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=True)(i)
+    print(f"DEBUG simple_qsum s.shape: {s.shape}")
+    m = keras.Model(i, s)
+    return m
 
-def test_build_lrgraph_from_model(model):
+
+def test_build_lrgraph_from_model(model, figurepath):
     lr_g = build_lr_graph_from_model(model)
     dot_str = lr_to_dot(lr_g)
     src = Source(dot_str)
-    src.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2", format="svg", view=True)
-
+    src.render(f"{figurepath}", format="svg", view=True)
+    return lr_g
 
 def test_write_rtl_from_lrgraph(model):
     lr_g = build_lr_graph_from_model(model)
@@ -148,11 +112,23 @@ def test_write_rtl_from_lrgraph(model):
     print(rtl_code)
     print(f"RTL code written to project directory: {project_dir}/top_module.sv")
 
-# test_build_lrgraph_from_opgraph(simple_opgraph())  
-# test_build_lrgraph_from_opgraph(two_layer_opgraph())
-# test_build_lrgraph_from_model()
-# test_write_rtl_from_lrgraph()
 
-# test_write_rtl_from_lrgraph(simple_qsum())
-test_build_lrgraph_from_model(m_with_qsum())
+def test_qsum_gen(model = simple_qsum()):
+    lrg = test_build_lrgraph_from_model(model, f"/homes/bm920/workspace/da4ml/.tmp/figures/qsum_lrg")
+    logic_impl = lrg.logic_nodes[1].logic_impl
+    print("\n\n\n")  
+    print(logic_impl) 
+    project_dir = f"/homes/bm920/workspace/da4ml/.tmp/qsum_testing_dir"
+    module_file, instance_decl, input_port_conns, output_port_conns = logic_impl.generate_hw(project_dir=project_dir, node=lrg.logic_nodes[1])
+    print(f"\n\n {module_file} {instance_decl} {input_port_conns} {output_port_conns}")
 
+# test_qsum_gen()
+a = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=True)
+print(a)
+print(a.iq.config.config)
+k = a.iq.config.config['k0']
+i = a.iq.config.config['i0']
+f = a.iq.config.config['f0']
+print(f"k: {k}, i: {i}, f: {f}")
+
+print(a.oq.config.config)
