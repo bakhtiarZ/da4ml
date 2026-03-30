@@ -7,13 +7,14 @@ from cocotb.triggers import RisingEdge
 
 import numpy as np
 import tensorflow as tf
-from da4ml_test_utils.graph_ir.test_lrgraph import two_layer_model, encode_to_d, encode_to
-from da4ml.graph_ir.lr_graph import build_lr_graph_from_model, HWInterface
+from da4ml_test_utils.graph_ir.test_lrgraph import Source, two_layer_model, encode_to_d, encode_to
+from da4ml.graph_ir.hardware_types import HWInterface
+from da4ml.graph_ir.lr_graph import LRGraph, build_lr_graph_from_model, lr_to_dot, configure_custom_logic_nodes, get_top_level_interface
 from da4ml.codegen.rtl.rtl_model import get_io_kifs
 from hgq.layers import QDense
 from hgq.config import QuantizerConfig
 
-from qsum_definitions import simple_qsum, qsum_lrg, generate_qsum_hw
+from qsum_definitions import m_with_qsum, simple_qsum, qsum_lrg, generate_qsum_hw
 
 
 # ============================================================
@@ -59,25 +60,34 @@ def hex_to_bin(hex_val: str | int, bitwidth: int) -> str:
 
     return format(value, f"0{bitwidth}b")
 
+def get_top_level_hw_interfaces(lrg: LRGraph):
+    first_node = lrg.logic_nodes[1] # skip input
+    fnhwi = HWInterface(first_node)
+    last_node = lrg.logic_nodes[max(lrg.logic_nodes.keys()) - 1] # skip output
+    lnhwi = HWInterface(last_node)
+    return fnhwi, lnhwi
 
 class TestTopSimpleTB:
     
     def __init__(self, model = build_golden_model()):
         self.model = model
         self.lrg = build_lr_graph_from_model(model)
-        self.input_node = self.lrg.logic_nodes[1]
-        generate_qsum_hw(self.lrg, f".tmp/delete_this_dir")
-        self.qsumlogic = self.lrg.logic_nodes[1].logic_impl
-
-        self.input_bitwidth_unpacked = self.qsumlogic.qsumgen.input_bitwidth
-        self.input_item_size = self.qsumlogic.qsumgen.input_item_size
-        self.input_bitwidth_packed = self.input_bitwidth_unpacked * self.input_item_size
-        self.input_kif = self.qsumlogic.qsumgen.input_kif
+        dot_str = lr_to_dot(self.lrg)
+        configure_custom_logic_nodes(self.lrg)
+        src = Source(dot_str)
+        src.render(f"./lr_graph_{self.model.name}", format="svg", view=True)
         
-        self.output_kif = self.qsumlogic.qsumgen.output_kif
-        self.output_bitwidth_unpacked = self.qsumlogic.qsumgen.output_bitwidth
-        self.output_item_size = self.qsumlogic.qsumgen.output_item_size
+        self.inp_hwi, self.out_hwi = get_top_level_hw_interfaces(self.lrg)
+        self.input_bitwidth_unpacked = self.inp_hwi.input_bitwidth
+        self.input_item_size = self.inp_hwi.input_item_size
+        self.input_kif = self.inp_hwi.input_kif
+        self.input_bitwidth_packed = self.input_bitwidth_unpacked * self.input_item_size
+        
+        self.output_bitwidth_unpacked = self.out_hwi.output_bitwidth
+        self.output_item_size = self.out_hwi.output_item_size
+        self.output_kif = self.out_hwi.output_kif        
         self.output_bitwidth_packed = self.output_bitwidth_unpacked * self.output_item_size
+
 
     def get_input_shapes(self):
         edge = self.lrg.routing_edges[self.lrg.logic_nodes[0].output_tids[0]]
@@ -136,12 +146,13 @@ class TestTopSimpleTB:
                 continue
             as_rtl = self.tensor_to_sample_vectors(output, output.shape[-1], self.output_kif)
             # print(f"Intermediate output of layer {i} ({self.model.layers[i].name}): {output.numpy()}")
-            print(f"Intermediate output of layer {i} ({self.model.layers[i].name}), real {output.numpy()}, as hex: {as_rtl}")
+            print(f"Expected intermediate output of layer {i} ({self.model.layers[i].name}), real {output.numpy()}, as hex: {as_rtl}")
             out.append((output, as_rtl))
         return out
     
     def postprocess_golden(self, y: tf.Tensor) -> np.ndarray:
-        y_vecs = self.tensor_to_sample_vectors(y, self.output_item_size, self.output_kif)
+        print(f"Postprocessing golden output tensor {y} with kif {self.output_kif}")
+        y_vecs = self.tensor_to_sample_vectors(y, self.output_item_size, self.output_kif, debug=True)
         y_packed = [self.pack_lsb_first(vec, self.output_bitwidth_unpacked) for vec in y_vecs]
         print(f"Postprocessed golden output vectors: real {y}, dut_exp {y_vecs}, packed: {y_packed}")
         return np.array(y_vecs, dtype=np.int64)
@@ -183,6 +194,11 @@ async def reset(dut, cycles: int):
         await RisingEdge(dut.clk)
     dut.rst.value = 0
     await RisingEdge(dut.clk)
+
+async def print_qsum(dut):
+    # dut._log.info(f"accum_count = {}")
+    dut._log.info(f"data_in: {dut.data_in.value}, in_valid: {dut.in_valid.value}, out_valid: {dut.out_valid.value}, data_out: {dut.data_out.value}")
+    
 
 
 async def stream_vectors_and_capture(tb, dut, vectors):
@@ -232,9 +248,9 @@ def extract_T_rows_from_stream(captured_rows: np.ndarray, T: int) -> np.ndarray:
 # ============================================================
 # The test
 # ============================================================
-tb = TestTopSimpleTB(model=build_golden_model())
-@cocotb.test()
-async def print_rtl_vs_keras_final_outputs(dut):
+# tb = TestTopSimpleTB(model=build_golden_model())
+# @cocotb.test()
+async def print_rtl_vs_keras_final_outputs_simple_qsum(dut):
     # Clock
     cocotb.start_soon(Clock(dut.clk, PARAMS["CLK_PERIOD_NS"], unit="ns").start())
 
@@ -271,6 +287,55 @@ async def print_rtl_vs_keras_final_outputs(dut):
     int_values = tb.get_intermediate_values()
     for i, v in enumerate(int_values):
         dut._log.info(f"Layer {i}: shape={v[0].shape}, values_real={v[0]}, rtl vals = {v[1]}")
+    
+    dut._log.info("=== KERAS OUTPUT (T x OUT_ELEMS) ===")
+    dut._log.info("\n" + str(y_np))
+
+    dut._log.info("=== KERAS OUTPUT as bitvectors ===")
+    dut._log.info("\n" + "\n".join(str(x) for x in expected_output.flatten()))
+
+    dut._log.info("=== RTL OUTPUT (T x OUT_ELEMS) extracted from stream ===")
+    dut._log.info("\n" + str(rtl_T_rows))
+
+
+tb1 = TestTopSimpleTB(model=build_golden_model(model=m_with_qsum()))
+@cocotb.test()
+async def print_rtl_vs_keras_final_outputs_m_with_qsum(dut):
+    # Clock
+    cocotb.start_soon(Clock(dut.clk, PARAMS["CLK_PERIOD_NS"], unit="ns").start())
+    # Reset
+    await reset(dut, PARAMS["RESET_CYCLES"])
+
+    real_inp, vectors = tb1.generate_stimulus()
+    dut._log.info(f"Generated stimulus vectors: {vectors}, with real input tensor {real_inp}")
+    T = len(vectors)
+
+    # --- Run golden Keras once on full tensor ---
+    model = tb1.model
+    y = model(real_inp, training=False)
+    expected_output = tb1.postprocess_golden(y.numpy())
+    dut._log.info(f"Generated expected outputs {expected_output}")
+    # Convert to numpy
+    try:
+        y_np = y.numpy()
+    except Exception:
+        y_np = np.asarray(y)
+
+    # --- Run RTL streaming + capture ---
+    captured_rows, _captured_packed = await stream_vectors_and_capture(tb1, dut, vectors)
+
+    dut._log.info(f"Captured rows {captured_rows}\npacked: {_captured_packed}")
+    
+    rtl_T_rows = extract_T_rows_from_stream(captured_rows, T)
+
+    # --- Print final outputs only ---
+    dut._log.info("=== INPUT (T x IN_ELEMS) ===")
+    dut._log.info("\n" + str(vectors))
+
+    dut._log.info("=== KERAS OUTPUT at each layer ===")
+    int_values = tb1.get_intermediate_values()
+    for i, v in enumerate(int_values):
+        dut._log.info(f"Layer {i}: shape={v[0].shape}, values_real={v[0]}, expected rtl vals = {v[1]}")
     
     dut._log.info("=== KERAS OUTPUT (T x OUT_ELEMS) ===")
     dut._log.info("\n" + str(y_np))

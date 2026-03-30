@@ -22,8 +22,14 @@ class CustomLogic(ABC):
         self.node = node
     
     @abstractmethod
-    def generate_hw(self, project_dir, node_id):
+    def configure(self, node):
         pass
+    
+    @abstractmethod
+    def generate_hw(self, project_dir):
+        pass
+    
+    
         
 
 class PureLogic:
@@ -41,8 +47,14 @@ class RoutingLogic:
 class HWInterface:
     def __init__(self, node):
         self.node = node
-        self.comb_logic = node.logic_impl
-        self.input_kif, self.output_kif = get_io_kifs(self.comb_logic)
+        if issubclass(type(node.logic_impl), CustomLogic):
+            self.comb_logic = node.logic_impl.internal_comb_logic
+            self.input_kif = node.logic_impl.input_kif
+            self.output_kif = node.logic_impl.output_kif
+        else:
+            self.comb_logic = node.logic_impl
+            self.input_kif, self.output_kif = get_io_kifs(self.comb_logic)
+            
         self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
         self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
         self.input_item_size = node.input_shapes[node.input_tids[0]][-1] 
@@ -74,16 +86,30 @@ class PortConnection:
 class QSumLogic(CustomLogic):
     def __init__(self, opr):
         self.opr = opr
-        self.axis = opr.operation.axes[0] 
+        self.axis_with_batch = opr.operation.axes[0] 
+        self.axis_without_batch = self.axis_with_batch - 1
+        
         
     def __repr__(self) -> str:
-        return f"QSumLogic(opr={self.opr.operation.name}, axis={self.axis})"
+        return f"QSumLogic(opr={self.opr.operation.name}, axis_with_batch={self.axis_with_batch}, axis_without_batch={self.axis_without_batch})"
     
-    def generate_hw(self, project_dir, node) -> str:
+    def configure(self, node):
         self.node = node
         self.node_id = node.op_id
-        self.qsumgen = QSumGen(self.node, project_dir, self.node_id, self.axis)
+        self.qsumgen = QSumGen(self.node, None, self.node_id, self.axis_without_batch)
         self.qsumgen.configure()
+        
+        self.internal_comb_logic = self.qsumgen.internal_adder
+        self.input_kif = self.qsumgen.input_kif
+        self.output_kif = self.qsumgen.output_kif
+        self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
+        self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
+        self.input_item_size = node.input_shapes[node.input_tids[0]][-1] 
+        self.output_item_size = node.output_shapes[node.output_tids[0]][-1]
+        print(f"\n\n DEBUG QSumLogic configured with input_kif: {self.input_kif}, output_kif: {self.output_kif}, input_bitwidth: {self.input_bitwidth}, output_bitwidth: {self.output_bitwidth}, input_item_size: {self.input_item_size}, output_item_size: {self.output_item_size}\n\n")
+    
+    def generate_hw(self, project_dir) -> str:
+        assert self.qsumgen is not None, "QSumGen is not configured. Please call configure(node) before generating hardware."
         return self.qsumgen.write_hw(project_dir)
     
 class QSumGen():
@@ -111,7 +137,7 @@ class QSumGen():
         assert self.semantic_output_shape[self.axis] == 1, f"Currently only support summing to a single value along the reduction axis, semantic_output_shape: {self.semantic_output_shape}, axis = {self.axis}, semantic input shape: {self.semantic_input_shape}"
         assert self.streaming_output_shape[self.axis] == 1, f"Currently only support summing to a single value along the reduction axis, but got streaming_output_shape: {self.streaming_output_shape}"
         self.accum_count = int(self.semantic_input_shape[self.axis] / self.streaming_input_shape[self.axis])    
-        
+        print(f"\n\n DEBUG accum_count: {self.accum_count}\n\n")
         self.module_port_names = {
             "clk": "clk",
             "rst": "rst",
@@ -154,7 +180,7 @@ class QSumGen():
         total_inp_kif, self.output_kif = get_io_kifs(self.internal_adder)
         self.input_kif = total_inp_kif[:,:-1]
         self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
-        print(f"\n\n DEBUG internal adder output_kif: {self.output_kif}, output_bitwidth: {self.output_bitwidth}\n\n")
+        # print(f"\n\n DEBUG internal adder output_kif: {self.output_kif}, output_bitwidth: {self.output_bitwidth}\n\n")
     
     def _create_preamble(self):
         module_definition = (" module QSum #() (\n" 
@@ -171,7 +197,7 @@ class QSumGen():
     
     def _write_body_of_module(self):
         adder_name = self.adder_instance_name
-        print(f"\n\n DEBUG accum_count: {self.accum_count}, input_bitwidth: {self.input_bitwidth}, input_item_size: {self.input_item_size}, output_bitwidth: {self.output_bitwidth}, output_item_size: {self.output_item_size}\n\n`")
+        # print(f"\n\n DEBUG accum_count: {self.accum_count}, input_bitwidth: {self.input_bitwidth}, input_item_size: {self.input_item_size}, output_bitwidth: {self.output_bitwidth}, output_item_size: {self.output_item_size}\n\n`")
         count_w = 1 if self.accum_count <= 1 else math.ceil(math.log2(self.accum_count + 1))
         input_width = self.input_bitwidth * self.input_item_size
         output_width = self.output_bitwidth * self.output_item_size
@@ -252,7 +278,7 @@ class QSumGen():
     def _write_instance_decl(self):
         # input port conns, output port conns, wiring and instance decl
         lines = []
-        lines.append(f"    // Instance of QSum for node {self.node_id}\n")
+        lines.append(f"// **** Instance of QSum for node {self.node_id} ****\n")
         input_port_conns = PortConnection(
             data=(f"data_in_{self.node_id}", self.input_bitwidth * self.input_item_size),
             valid=f"in_valid_{self.node_id}",

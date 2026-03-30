@@ -3,7 +3,9 @@ from os import getenv
 from pathlib import Path
 from cocotb_tools.runner import get_runner
 
-from qsum_definitions import qsum_lrg, generate_qsum_hw 
+from da4ml.graph_ir.lr_graph import lr_graph_to_hardware
+from qsum_definitions import m_with_qsum, qsum_lrg, generate_qsum_hw, simple_qsum
+import shutil
 
 
 PROJ_ROOT = Path(__file__).resolve().parent
@@ -17,7 +19,13 @@ TESTS_DIR = HERE / "tests"
 
 def main():
     sim = getenv("SIM", "verilator")
-    generate_qsum_hw(qsum_lrg(), RTL_DIR)
+    model = m_with_qsum()
+    # model = simple_qsum()
+    # if RTL_DIR.exists():
+    #     shutil.rmtree(RTL_DIR)
+    # RTL_DIR.mkdir(parents=True, exist_ok=True)
+    
+    lines_written = lr_graph_to_hardware(qsum_lrg(model), RTL_DIR, debug=False)
     verilog_sources = sorted(map(str, RTL_DIR.rglob("*.v")))
     verilog_sources += sorted(map(str, RTL_DIR.rglob("*.sv")))
 

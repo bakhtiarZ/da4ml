@@ -74,7 +74,6 @@ def _min_shapes_for_op(
     
     if schedule is None:
         return in_no_batch_int, out_no_batch_int
-
     min_in_no_batch = schedule.minimum_input_shape(in_no_batch_int, **kwargs)
     min_out_no_batch = schedule.minimum_output_shape(out_no_batch_int, **kwargs)
 
@@ -121,7 +120,8 @@ def create_logic_impl_from_oprepr(
     
     elif issubclass(schedule.hardware_type, CustomLogic):
         logic_impl = schedule.hardware_type(opr)
-        min_in_shape, min_out_shape = _min_shapes_for_op(opr, schedule, axes=opr.operation.axes)
+        axes_without_batch = tuple(axis - 1 for axis in opr.operation.axes) if opr.operation.axes is not None else None
+        min_in_shape, min_out_shape = _min_shapes_for_op(opr, schedule, axes=axes_without_batch)
         return logic_impl, min_in_shape, min_out_shape
     
     elif schedule.hardware_type == CombLogic:
@@ -302,8 +302,8 @@ def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
 def create_logic_node_hw(node_id, node, project_dir):
     if (type(node.logic_impl) == CombLogic):
         return create_comb_logic_node_hw(node_id, node, project_dir)
-    elif (type(node.logic_impl) == CustomLogic):
-        lines, input_port_conns, output_port_conns = node.logic_impl.generate_hw(project_dir=project_dir, node_id=node_id)
+    elif (issubclass(type(node.logic_impl), CustomLogic)):
+        module_file_path, lines, input_port_conns, output_port_conns = node.logic_impl.generate_hw(project_dir=project_dir)
         return lines, input_port_conns, output_port_conns
     elif (type(node.logic_impl) == PureLogic):
         print("PureLogic node, no hardware to generate, what happened here? is this supposed to be called?")
@@ -410,7 +410,16 @@ def assign_inputs_with_previous(input_port_conns_previous: PortConnection, input
     lines.append(f"assign {input_port_conns_next.valid} = {output_port_conns_previous.valid};")
     return "\n".join(lines)
 
+def configure_custom_logic_nodes(lr: LRGraph):
+    for node_id, node in lr.logic_nodes.items():
+        if issubclass(type(node.logic_impl), CustomLogic):
+            node.logic_impl.configure(node)
+
 def lr_graph_to_hardware(lr: LRGraph, project_dir: str | Path, debug=False) -> int:
+    
+    # injecting node and making hw configs for custom logics
+    configure_custom_logic_nodes(lr)
+    
     lines = []
     os.makedirs(project_dir, exist_ok=True)
     #copy the src file for fifo_rv
@@ -430,6 +439,8 @@ def lr_graph_to_hardware(lr: LRGraph, project_dir: str | Path, debug=False) -> i
             lines.append(assignments) 
             continue
         ln_lines, l_input_port_connections, l_output_port_connections = create_logic_node_hw(node_id, node, project_dir)
+        if (type(ln_lines) == str):
+            ln_lines = [ln_lines]
         lines.extend(ln_lines)
         assignments = assign_inputs_with_previous(input_ports_of_previous, l_input_port_connections, output_ports_of_previous, l_output_port_connections)
         lines.append(f"\n// Connecting intermediate signals of node {node_id} to previous intermediate signals\n{assignments}\n// End of connections for node {node_id}\n")

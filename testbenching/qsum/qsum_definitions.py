@@ -12,7 +12,13 @@ def config():
 def simple_qsum():
     i = keras.Input((3, 1))
     s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=True)(i)
-    print(f"DEBUG simple_qsum s.shape: {s.shape}")
+    m = keras.Model(i, s)
+    return m
+
+def m_with_qsum():
+    i = keras.Input((3,1))
+    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(i) # 3, 1
+    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=True)(d0) # 1, 1
     m = keras.Model(i, s)
     return m
 
