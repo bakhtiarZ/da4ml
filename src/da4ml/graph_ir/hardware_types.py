@@ -18,8 +18,8 @@ from .util import OpRepr, _strip_batch_and_ensure_ints
 class CustomLogic(ABC):
     
     @abstractmethod
-    def __init__(self, node):
-        self.node = node
+    def __init__(self, opr):
+        self.opr = opr
     
     @abstractmethod
     def configure(self, node):

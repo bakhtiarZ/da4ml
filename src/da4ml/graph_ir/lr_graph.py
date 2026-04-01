@@ -54,11 +54,12 @@ class LRGraph:
     routing_edges: Dict[int, RoutingEdge]
     model_input_tids: List[int] = field(default_factory=list)
     model_output_tids: List[int] = field(default_factory=list)
-
+    parallelism: int = 1
 
 def _min_shapes_for_op(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
+    parallelism: int = 1,
     **kwargs: Any,
 ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
     """
@@ -76,9 +77,12 @@ def _min_shapes_for_op(
         return in_no_batch_int, out_no_batch_int
     min_in_no_batch = schedule.minimum_input_shape(in_no_batch_int, **kwargs)
     min_out_no_batch = schedule.minimum_output_shape(out_no_batch_int, **kwargs)
-
     min_in = tuple(min_in_no_batch)
     min_out = tuple(min_out_no_batch)
+
+    streamed_in_no_batch = (min_in[0] * parallelism, min_in[1:])
+    streamed_out_no_batch = (min_out[0] * parallelism, min_out[1:])
+
     return min_in, min_out
 
 
@@ -112,7 +116,9 @@ def create_comb_logic_from_oprepr(
 def create_logic_impl_from_oprepr(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
+    parallelism: int = 1,
 ) -> CombLogic | PureLogic | CustomLogic:
+    
     if opr.operation.__class__ is keras.layers.InputLayer:
         out_no_batch_int = _strip_batch_and_ensure_ints(opr.produces[0].shape)
         shp = out_no_batch_int
@@ -136,6 +142,7 @@ def build_lr_graph_from_parsed(
     *,
     model_inputs: Optional[Sequence[keras.KerasTensor]] = None,
     model_outputs: Optional[Sequence[keras.KerasTensor]] = None,
+    parallelism: int = 1,
 ) -> LRGraph:
     """
     Build LRGraph directly from parsed ops.
@@ -179,7 +186,7 @@ def build_lr_graph_from_parsed(
         in_tids = [id(t) for t in in_ts]
         out_tids = [id(t) for t in out_ts]
 
-        logic_impl, min_in_shape, min_out_shape = create_logic_impl_from_oprepr(opr, schedule)
+        logic_impl, min_in_shape, min_out_shape = create_logic_impl_from_oprepr(opr, schedule, parallelism=parallelism)
 
         node = LogicNode(
             op_id=op_id,
@@ -237,7 +244,7 @@ def build_lr_graph_from_parsed(
     return lr
 
 
-def build_lr_graph_from_model(model: keras.Model) -> LRGraph:
+def build_lr_graph_from_model(model: keras.Model, parallelism: int = 1) -> LRGraph:
     """
     Convenience wrapper that calls parse_model(model) then builds LRGraph.
     """
@@ -249,6 +256,7 @@ def build_lr_graph_from_model(model: keras.Model) -> LRGraph:
         parsed,
         model_inputs=model.inputs,
         model_outputs=model.outputs,
+        parallelism=parallelism,
     )
 
 
