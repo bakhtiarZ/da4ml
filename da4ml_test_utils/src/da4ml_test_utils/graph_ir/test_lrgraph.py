@@ -102,8 +102,8 @@ def two_layer_opgraph():
     return g
 
 def two_layer_model():
-    i = keras.Input((3,2))
-    d0 = QDense(3, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
+    i = keras.Input((4,2))
+    d0 = QDense(2, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
     d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')
     out = d1(d0(i))
     m = keras.Model(i, out)
@@ -131,12 +131,37 @@ def m_with_qsum():
     m = keras.Model(i, d0)
     return m
 
+def m_with_qsum():
+    i = keras.Input((3,2))
+    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=0, scale=1, keepdims=False)(i) # 1, 2
+    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(s) # 1, 1
+    m = keras.Model(i, d0)
+    return m
+
+def m_testing_parallelism():
+    i = keras.Input((4,2))
+    d0 = QDense(2, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(i) # 4, 2
+    d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(d0) # 4, 2
+    m = keras.Model(i, d1)
+    return m
 
 def test_build_lrgraph_from_model(model):
-    lr_g = build_lr_graph_from_model(model)
+    lr_g = build_lr_graph_from_model(model, parallelism=1)
     dot_str = lr_to_dot(lr_g)
     src = Source(dot_str)
     src.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2", format="svg", view=True)
+
+
+def test_parallelism_build_lrgraph_from_model(model):
+    # lr_g = build_lr_graph_from_model(model, parallelism=1)
+    # dot_str = lr_to_dot(lr_g)
+    # src = Source(dot_str)
+    # src.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2", format="svg", view=True)
+
+    lrg2 = build_lr_graph_from_model(model, parallelism=2)
+    dot_str2 = lr_to_dot(lrg2)
+    src2 = Source(dot_str2)
+    src2.render("/homes/bm920/workspace/da4ml/.tmp/figures/lr_graphv2_parallel2", format="svg", view=True)
 
 
 def test_write_rtl_from_lrgraph(model):
@@ -148,11 +173,24 @@ def test_write_rtl_from_lrgraph(model):
     print(rtl_code)
     print(f"RTL code written to project directory: {project_dir}/top_module.sv")
 
+def test_parallelism_write_rtl_from_lrgraph(model):
+    N=2
+    lr_g = build_lr_graph_from_model(model, parallelism=N)
+    # project_dir = make_next_numbered_dir('/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/', prefix='project_')
+    name = f"{model.name}_parallel{N}" if model.name else f"model_parallel{N}"
+    project_dir = f"/homes/bm920/workspace/da4ml/.tmp/lr_graph_rtl_projects/project_test/{name}"
+    rtl_code = lr_graph_to_hardware(lr_g, project_dir, debug=True)
+    print(rtl_code)
+    print(f"RTL code written to project directory: {project_dir}/top_module.sv")
+
+
 # test_build_lrgraph_from_opgraph(simple_opgraph())  
 # test_build_lrgraph_from_opgraph(two_layer_opgraph())
 # test_build_lrgraph_from_model()
 # test_write_rtl_from_lrgraph()
 
 # test_write_rtl_from_lrgraph(simple_qsum())
-test_build_lrgraph_from_model(m_with_qsum())
+# test_write_rtl_from_lrgraph(model=two_layer_model())
+test_parallelism_write_rtl_from_lrgraph(model=two_layer_model())
+# test_parallelism_build_lrgraph_from_model(m_testing_parallelism())
 

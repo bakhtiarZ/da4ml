@@ -7,7 +7,7 @@ import keras
 
 
 def config():
-    return {}
+    return {"PARALLELISM": 2}
 
 def simple_qsum():
     i = keras.Input((3, 1))
@@ -22,9 +22,13 @@ def m_with_qsum():
     m = keras.Model(i, s)
     return m
 
-def qsum_lrg(model = simple_qsum()):
-    lrg = build_lr_graph_from_model(model)
-    return lrg
+def m_testing_parallelism():
+    i = keras.Input((4,2))
+    d0 = QDense(2, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(i) # 4, 2
+    d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(d0) # 4, 2
+    m = keras.Model(i, d1)
+    return m
+
 
 def generate_qsum_hw(lrg, dir):
     logic_impl = lrg.logic_nodes[1].logic_impl

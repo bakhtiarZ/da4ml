@@ -2,20 +2,20 @@
 
 module mod_op_2__QDense_wrapper (
     // verilator lint_off UNUSEDSIGNAL
-    input [23:0] model_inp,
+    input [15:0] model_inp,
     // verilator lint_on UNUSEDSIGNAL
-    output [8:0] model_out
+    output [7:0] model_out
 );
-    wire [23:0] packed_inp;
-    wire [8:0] packed_out;
+    wire [15:0] packed_inp;
+    wire [7:0] packed_out;
 
-    assign packed_inp[23:0] = model_inp[23:0];
+    assign packed_inp[15:0] = model_inp[15:0];
 
     mod_op_2__QDense op (
         .model_inp(packed_inp),
         .model_out(packed_out)
     );
 
-    assign model_out[8:0] = packed_out[8:0];
+    assign model_out[7:0] = packed_out[7:0];
 
 endmodule

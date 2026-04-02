@@ -56,7 +56,7 @@ class LRGraph:
     model_output_tids: List[int] = field(default_factory=list)
     parallelism: int = 1
 
-def _min_shapes_for_op(
+def _streaming_shapes_for_op(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
     parallelism: int = 1,
@@ -80,18 +80,18 @@ def _min_shapes_for_op(
     min_in = tuple(min_in_no_batch)
     min_out = tuple(min_out_no_batch)
 
-    streamed_in_no_batch = (min_in[0] * parallelism, min_in[1:])
-    streamed_out_no_batch = (min_out[0] * parallelism, min_out[1:])
-
-    return min_in, min_out
+    streamed_in_no_batch = (min_in[0] * parallelism, *min_in[1:])
+    streamed_out_no_batch = (min_out[0] * parallelism, *min_out[1:])
+    return streamed_in_no_batch, streamed_out_no_batch
 
 
 def create_comb_logic_from_oprepr(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
+    parallelism: int = 1,
 ) -> Tuple[CombLogic | PureLogic, Tuple[int, ...], Tuple[int, ...]]:
     
-    min_in_shape, min_out_shape = _min_shapes_for_op(opr, schedule)
+    min_in_shape, min_out_shape = _streaming_shapes_for_op(opr, schedule, parallelism=parallelism)
 
     # Build a minimal model around this operation
     min_inp = keras.Input(shape=min_in_shape) # Keras Input excludes batch dimension, but our shapes include batch=1, so we use min_in_shape[1:] here
@@ -127,11 +127,11 @@ def create_logic_impl_from_oprepr(
     elif issubclass(schedule.hardware_type, CustomLogic):
         logic_impl = schedule.hardware_type(opr)
         axes_without_batch = tuple(axis - 1 for axis in opr.operation.axes) if opr.operation.axes is not None else None
-        min_in_shape, min_out_shape = _min_shapes_for_op(opr, schedule, axes=axes_without_batch)
+        min_in_shape, min_out_shape = _streaming_shapes_for_op(opr, schedule, parallelism=parallelism, axes=axes_without_batch)
         return logic_impl, min_in_shape, min_out_shape
     
     elif schedule.hardware_type == CombLogic:
-        return create_comb_logic_from_oprepr(opr, schedule)
+        return create_comb_logic_from_oprepr(opr, schedule, parallelism=parallelism)
     
     else:
         raise AssertionError(f"Hardware type is not recognised opr class: {opr.operation.__class__}, schedule hardware type: {schedule.hardware_type}")
@@ -187,7 +187,6 @@ def build_lr_graph_from_parsed(
         out_tids = [id(t) for t in out_ts]
 
         logic_impl, min_in_shape, min_out_shape = create_logic_impl_from_oprepr(opr, schedule, parallelism=parallelism)
-
         node = LogicNode(
             op_id=op_id,
             operation=opr.operation,
@@ -217,10 +216,17 @@ def build_lr_graph_from_parsed(
                     )
                 to_shape = e.to_compute_shapes[op_id]
                 if tuple(e.from_compute_shape) == tuple(to_shape):
-                    buffer_size = 1
+                    # buffer_size = math.prod(e.from_compute_shape[:-1]) # if the shapes match, we just need a register (1 slot fifo) that holds the output
+                    buffer_size = 1 # if the shapes match, we just need a register (1 slot fifo) that holds the output
                 else:
-                    buffer_size = math.prod(e.semantic_shape[:-1])  # leading dims only
-                item_size = e.from_compute_shape[-1] # this may not always be -1, need to fix later
+                    assert e.from_compute_shape[-1] == to_shape[-1], "The last dimension of the streaming shape must match between nodes."
+                    assert len(e.from_compute_shape) == 2, "The length of the shape must be 2 (flattened_leading, features) for streaming right now."
+                    assert len(to_shape) == 2, "The length of the shape must be 2 (flattened_leading, features) for streaming right now."
+                    assert e.from_compute_shape[0] % to_shape[0] == 0, "The leading dimension of the from_compute_shape must be divisible by the leading dimension of the to_compute_shape for streaming"
+                    buffer_size = e.from_compute_shape[0] // to_shape[0] 
+                    # buffer_size = math.prod(e.semantic_shape[:-1])  # leading dims only
+                # item_size = e.from_compute_shape[-1] # this may not always be -1, need to fix later
+                item_size = math.prod(to_shape) # this needs to be there for parallelism in batch > 1
                 e.routing_logic = RoutingLogic(
                     buffer_type=schedule.buffer_type if op_id != 1 else "input_buffer", 
                     buffer_shape=(buffer_size, item_size),
@@ -356,7 +362,7 @@ def create_comb_logic_node_hw(node_id, node, project_dir):
     #since the comb logic has no ready and valid, just assign it to the previous one as passthrough for now
     lines.append(f"assign {output_port_conns.valid} = {input_port_conns.valid}; // passthrough valid")
     lines.append(f"assign {output_port_conns.ready} = {input_port_conns.ready}; // passthrough ready")
-    lines.append(f"mod_{instance_name} {instance_name} ({port_conns});")
+    lines.append(f"mod_{instance_name}_wrapper {instance_name} ({port_conns});")
     lines.append(f"// End of logic node {node_id}")
     return lines, input_port_conns, output_port_conns
 
@@ -457,7 +463,7 @@ def lr_graph_to_hardware(lr: LRGraph, project_dir: str | Path, debug=False) -> i
             input_ports_of_previous = l_input_port_connections
             continue
         edge_for_buffer = lr.routing_edges[node.output_tids[0]]
-        buffer_lines, buffer_input_port_conn, buffer_output_port_conn = create_buffer(l_output_port_connections.data[1], edge_for_buffer)
+        buffer_lines, buffer_input_port_conn, buffer_output_port_conn = create_buffer(packed_bitwidth=l_output_port_connections.data[1], r_edge=edge_for_buffer)
         lines.extend(buffer_lines)
         assignments = assign_inputs_with_previous(l_input_port_connections, buffer_input_port_conn, l_output_port_connections, buffer_output_port_conn)
         lines.append(f"\n// Connecting buffer for edge tid={edge_for_buffer.tid} to logic node {node_id}\n{assignments}\n// End of connections for buffer for edge tid={edge_for_buffer.tid}\n")
@@ -494,6 +500,30 @@ def lr_to_dot(lr: LRGraph) -> str:
     def short_tid(tid: int, n: int = 6) -> str:
         s = str(tid)
         return s[-n:] if len(s) > n else s
+
+    def op_tensor_shapes(tensors: Any) -> str:
+        if tensors is None:
+            return "(none)"
+        if isinstance(tensors, (list, tuple)):
+            return ", ".join(str(getattr(t, "shape", None)) for t in tensors)
+        return str(getattr(tensors, "shape", None))
+
+    def op_rows(n: LogicNode) -> List[str]:
+        if n.operation is None:
+            return []
+
+        rows = [
+            f'<TR><TD ALIGN="left">layer input: {esc(op_tensor_shapes(getattr(n.operation, "input", None)))}</TD></TR>',
+            f'<TR><TD ALIGN="left">layer output: {esc(op_tensor_shapes(getattr(n.operation, "output", None)))}</TD></TR>',
+        ]
+
+        if isinstance(n.operation, keras.layers.Dense):
+            rows.append(f'<TR><TD ALIGN="left">units: {esc(n.operation.units)}</TD></TR>')
+            activation = getattr(getattr(n.operation, "activation", None), "__name__", None)
+            if activation is not None:
+                rows.append(f'<TR><TD ALIGN="left">activation: {esc(activation)}</TD></TR>')
+
+        return rows
 
     def edge_color(e: RoutingEdge, to: int) -> str:
         # simple heuristic colouring (optional but helpful)
@@ -534,6 +564,7 @@ def lr_to_dot(lr: LRGraph) -> str:
             rows.append(f'<TR><TD ALIGN="left">name: {esc(op_name)}</TD></TR>')
         if issubclass(type(n.logic_impl), CustomLogic):
             rows.append(f'<TR><TD ALIGN="left">logic: {esc(n.logic_impl)}</TD></TR>')
+        rows.extend(op_rows(n))
          
         rows.append('<TR><TD ALIGN="left" BGCOLOR="#eeeeee"><B>Inputs</B></TD></TR>')
         if n.input_tids:
@@ -594,33 +625,3 @@ def lr_to_dot(lr: LRGraph) -> str:
 
     lines.append("}")
     return "\n".join(lines)
-
-
-### depr
-# class LRGraphAPI:
-#     def __init__(self, lr_graph: LRGraph):
-#         self.lr_graph = lr_graph
-
-#     def print(self) -> None:
-#         print("\nLogic Nodes:")
-#         for node_id, n in self.lr_graph.logic_nodes.items():
-#             op_name = None
-#             if n.operation is not None:
-#                 op_name = f"{n.operation.__class__.__name__}({getattr(n.operation, 'name', '')})"
-#             else:
-#                 op_name = "PureOutput"
-#             print(
-#                 f"Node {node_id}: {op_name} | "
-#                 f"in={len(n.input_tids)} out={len(n.output_tids)}"
-#             )
-
-#         print("\nRouting Edges:")
-#         for tid, e in self.lr_graph.routing_edges.items():
-#             tname = getattr(e.tensor, "name", str(tid)) if e.tensor is not None else str(tid)
-#             print(
-#                 f"Edge {tname}: "
-#                 f"from={e.from_node} -> to={sorted(e.to_nodes)} "
-#                 f"| from_shape={e.from_compute_shape} "
-#                 f"| to_shapes={{{', '.join(f'{k}:{v}' for k,v in e.to_compute_shapes.items())}}}"
-#             )
-#         print("")

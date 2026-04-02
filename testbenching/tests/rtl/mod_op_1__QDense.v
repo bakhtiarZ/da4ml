@@ -2,7 +2,7 @@
 
 module mod_op_1__QDense (
     input [15:0] model_inp,
-    output [23:0] model_out
+    output [15:0] model_out
 );
 
     // verilator lint_off UNUSEDSIGNAL
@@ -22,6 +22,5 @@ module mod_op_1__QDense (
 
     assign model_out[7:0] = v8[7:0];
     assign model_out[15:8] = v8[7:0];
-    assign model_out[23:16] = v8[7:0];
 
     endmodule

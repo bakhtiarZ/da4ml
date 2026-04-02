@@ -3,8 +3,8 @@ from os import getenv
 from pathlib import Path
 from cocotb_tools.runner import get_runner
 
-from da4ml.graph_ir.lr_graph import lr_graph_to_hardware
-from qsum_definitions import m_with_qsum, qsum_lrg, generate_qsum_hw, simple_qsum
+from da4ml.graph_ir.lr_graph import build_lr_graph_from_model, lr_graph_to_hardware
+from qsum_definitions import config, m_with_qsum, generate_qsum_hw, simple_qsum, m_testing_parallelism
 import shutil
 
 
@@ -19,13 +19,14 @@ TESTS_DIR = HERE / "tests"
 
 def main():
     sim = getenv("SIM", "verilator")
-    model = m_with_qsum()
+    # model = m_with_qsum()
+    model = m_testing_parallelism()
     # model = simple_qsum()
     # if RTL_DIR.exists():
     #     shutil.rmtree(RTL_DIR)
     # RTL_DIR.mkdir(parents=True, exist_ok=True)
-    
-    lines_written = lr_graph_to_hardware(qsum_lrg(model), RTL_DIR, debug=False)
+    lrg = build_lr_graph_from_model(model, parallelism=config().get("PARALLELISM", 1))
+    lines_written = lr_graph_to_hardware(lrg, RTL_DIR, debug=False)
     verilog_sources = sorted(map(str, RTL_DIR.rglob("*.v")))
     verilog_sources += sorted(map(str, RTL_DIR.rglob("*.sv")))
 
@@ -33,7 +34,7 @@ def main():
 
     runner.build(
         verilog_sources=verilog_sources,
-        hdl_toplevel="QSum",
+        hdl_toplevel="top_module",
         build_args=[
             "--trace",
             "--trace-structs",
@@ -45,7 +46,7 @@ def main():
     )
 
     runner.test(
-        hdl_toplevel="QSum",
+        hdl_toplevel="top_module",
         test_module="test_qsum",
         test_dir=str(TESTS_DIR),
         waves=True,

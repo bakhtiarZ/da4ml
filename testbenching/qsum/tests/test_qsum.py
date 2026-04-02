@@ -7,14 +7,14 @@ from cocotb.triggers import RisingEdge
 
 import numpy as np
 import tensorflow as tf
-from da4ml_test_utils.graph_ir.test_lrgraph import Source, two_layer_model, encode_to_d, encode_to
+from da4ml_test_utils.graph_ir.test_lrgraph import Source, m_testing_parallelism, two_layer_model, encode_to_d, encode_to
 from da4ml.graph_ir.hardware_types import HWInterface
 from da4ml.graph_ir.lr_graph import LRGraph, build_lr_graph_from_model, lr_to_dot, configure_custom_logic_nodes, get_top_level_interface
 from da4ml.codegen.rtl.rtl_model import get_io_kifs
 from hgq.layers import QDense
 from hgq.config import QuantizerConfig
 
-from qsum_definitions import m_with_qsum, simple_qsum, qsum_lrg, generate_qsum_hw
+from qsum_definitions import config, m_with_qsum, simple_qsum, generate_qsum_hw
 
 
 # ============================================================
@@ -71,7 +71,7 @@ class TestTopSimpleTB:
     
     def __init__(self, model = build_golden_model()):
         self.model = model
-        self.lrg = build_lr_graph_from_model(model)
+        self.lrg = build_lr_graph_from_model(model, parallelism=config().get("PARALLELISM", 1))
         dot_str = lr_to_dot(self.lrg)
         configure_custom_logic_nodes(self.lrg)
         src = Source(dot_str)
@@ -176,7 +176,9 @@ class TestTopSimpleTB:
             elem_width = self.output_bitwidth_unpacked
         if n_elems is None:
             n_elems = self.output_item_size
-        mask = (1 << elem_width) - 1
+        elem_width = int(elem_width)
+        mask = int((1 << elem_width) - 1)
+        word = int(word)
         return [(word >> (i * elem_width)) & mask for i in range(n_elems)]
 
 def get_lrg():
@@ -197,7 +199,7 @@ async def reset(dut, cycles: int):
 
 async def print_qsum(dut):
     # dut._log.info(f"accum_count = {}")
-    dut._log.info(f"data_in: {dut.data_in.value}, in_valid: {dut.in_valid.value}, out_valid: {dut.out_valid.value}, data_out: {dut.data_out.value}")
+    dut._log.info(f"data_in: {dut.data_in.value}, in_valid: {dut.data_in_valid.value}, out_valid: {dut.data_out_valid.value}, data_out: {dut.data_out.value}")
     
 
 
@@ -216,13 +218,13 @@ async def stream_vectors_and_capture(tb, dut, vectors):
 
     for i in range(total_cycles):
         dut.data_in.value = int(in_words[i]) if i < len(in_words) else 0
-        dut.in_valid.value = 1 if i < len(in_words) else 0
-        dut.out_ready.value = 1  # always ready to receive output
-        print(f"Cycle {i}: data_in={dut.data_in.value} valid={dut.in_valid.value} ready={dut.out_ready.value}")
+        dut.data_in_valid.value = 1 if i < len(in_words) else 0
+        dut.data_out_ready.value = 1  # always ready to receive output
+        print(f"Cycle {i}: data_in={dut.data_in.value} valid={dut.data_in_valid.value} ready={dut.data_out_ready.value}")
         await RisingEdge(dut.clk)
 
         w = int(dut.data_out.value)
-        if dut.out_valid.value == 1:
+        if dut.data_out_valid.value == 1:
             print(f"Captured output word: {w}, binary: {hex_to_bin(w, tb.output_bitwidth_packed)}")
             print(f"Unpacked output elems: {tb.unpack_lsb_first(w)}")
             print(f"DEBUG: dut.data_out.value: {dut.data_out.value}")
@@ -248,57 +250,9 @@ def extract_T_rows_from_stream(captured_rows: np.ndarray, T: int) -> np.ndarray:
 # ============================================================
 # The test
 # ============================================================
-# tb = TestTopSimpleTB(model=build_golden_model())
-# @cocotb.test()
-async def print_rtl_vs_keras_final_outputs_simple_qsum(dut):
-    # Clock
-    cocotb.start_soon(Clock(dut.clk, PARAMS["CLK_PERIOD_NS"], unit="ns").start())
 
-    # Reset
-    await reset(dut, PARAMS["RESET_CYCLES"])
-
-    real_inp, vectors = tb.generate_stimulus()
-    T = len(vectors)
-
-    # --- Run golden Keras once on full tensor ---
-    # vectors has shape (T, IN_ELEMS), model expects (batch, IN_ELEMS)
-    model = tb.model
-    y = model(real_inp, training=False)
-    expected_output = tb.postprocess_golden(y.numpy())
-    dut._log.info(f"Generated expected outputs {expected_output}")
-    # Convert to numpy
-    try:
-        y_np = y.numpy()
-    except Exception:
-        y_np = np.asarray(y)
-
-    # --- Run RTL streaming + capture ---
-    captured_rows, _captured_packed = await stream_vectors_and_capture(tb, dut, vectors)
-
-    dut._log.info(f"Captured rows {captured_rows}\npacked: {_captured_packed}")
-    
-    rtl_T_rows = extract_T_rows_from_stream(captured_rows, T)
-
-    # --- Print final outputs only ---
-    dut._log.info("=== INPUT (T x IN_ELEMS) ===")
-    dut._log.info("\n" + str(vectors))
-
-    dut._log.info("=== KERAS OUTPUT at each layer ===")
-    int_values = tb.get_intermediate_values()
-    for i, v in enumerate(int_values):
-        dut._log.info(f"Layer {i}: shape={v[0].shape}, values_real={v[0]}, rtl vals = {v[1]}")
-    
-    dut._log.info("=== KERAS OUTPUT (T x OUT_ELEMS) ===")
-    dut._log.info("\n" + str(y_np))
-
-    dut._log.info("=== KERAS OUTPUT as bitvectors ===")
-    dut._log.info("\n" + "\n".join(str(x) for x in expected_output.flatten()))
-
-    dut._log.info("=== RTL OUTPUT (T x OUT_ELEMS) extracted from stream ===")
-    dut._log.info("\n" + str(rtl_T_rows))
-
-
-tb1 = TestTopSimpleTB(model=build_golden_model(model=m_with_qsum()))
+# tb1 = TestTopSimpleTB(model=build_golden_model(model=m_with_qsum()))
+tb1 = TestTopSimpleTB(model=build_golden_model(model=m_testing_parallelism()))
 @cocotb.test()
 async def print_rtl_vs_keras_final_outputs_m_with_qsum(dut):
     # Clock

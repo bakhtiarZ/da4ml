@@ -57,8 +57,8 @@ class HWInterface:
             
         self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
         self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
-        self.input_item_size = node.input_shapes[node.input_tids[0]][-1] 
-        self.output_item_size = node.output_shapes[node.output_tids[0]][-1]
+        self.input_item_size = math.prod(node.input_shapes[node.input_tids[0]]) 
+        self.output_item_size = math.prod(node.output_shapes[node.output_tids[0]])
     
     def get_input_bw_is(self):
         return self.input_bitwidth, self.input_item_size
@@ -142,11 +142,11 @@ class QSumGen():
             "clk": "clk",
             "rst": "rst",
             "data_in": f"data_in",
-            "in_valid": f"in_valid",
-            "in_ready": f"in_ready",
+            "in_valid": f"data_in_valid",
+            "in_ready": f"data_in_ready",
             "data_out": f"data_out",
-            "out_valid": f"out_valid",
-            "out_ready": f"out_ready"
+            "out_valid": f"data_out_valid",
+            "out_ready": f"data_out_ready"
         }
         self._create_internal_adder()
 
