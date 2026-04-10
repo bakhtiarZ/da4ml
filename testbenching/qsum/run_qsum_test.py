@@ -4,7 +4,7 @@ from pathlib import Path
 from cocotb_tools.runner import get_runner
 
 from da4ml.graph_ir.lr_graph import build_lr_graph_from_model, lr_graph_to_hardware
-from qsum_definitions import config, m_with_qsum, generate_qsum_hw, simple_qsum, m_testing_parallelism
+from qsum_definitions import config, m_with_qsum, m_with_qsum_fixed_q_conf, simple_qsum, m_testing_parallelism
 import shutil
 
 
@@ -20,7 +20,7 @@ TESTS_DIR = HERE / "tests"
 def main():
     sim = getenv("SIM", "verilator")
     # model = m_with_qsum()
-    model = m_testing_parallelism()
+    model = m_with_qsum_fixed_q_conf()
     # model = simple_qsum()
     # if RTL_DIR.exists():
     #     shutil.rmtree(RTL_DIR)
@@ -39,7 +39,6 @@ def main():
             "--trace",
             "--trace-structs",
             "-O0",
-            "-build-jobs", "8",
         ],
         waves=True,
         always=True,

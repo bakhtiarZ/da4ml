@@ -3,7 +3,7 @@ from typing import Optional
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import RisingEdge, Timer
 
 import numpy as np
 import tensorflow as tf
@@ -14,7 +14,7 @@ from da4ml.codegen.rtl.rtl_model import get_io_kifs
 from hgq.layers import QDense
 from hgq.config import QuantizerConfig
 
-from qsum_definitions import config, m_with_qsum, simple_qsum, generate_qsum_hw
+from qsum_definitions import config, m_with_qsum, simple_qsum, generate_qsum_hw, m_with_qsum_fixed_q_conf
 
 
 # ============================================================
@@ -48,8 +48,7 @@ PARAMS = {
     # Flush cycles after last input is sent (give pipeline time to finish)
     "FLUSH_CYCLES": 10,
 }
-def build_golden_model(model = simple_qsum()):
-    return model
+
 
 def hex_to_bin(hex_val: str | int, bitwidth: int) -> str:
     if isinstance(hex_val, str):
@@ -69,13 +68,14 @@ def get_top_level_hw_interfaces(lrg: LRGraph):
 
 class TestTopSimpleTB:
     
-    def __init__(self, model = build_golden_model()):
+    def __init__(self, model):
         self.model = model
-        self.lrg = build_lr_graph_from_model(model, parallelism=config().get("PARALLELISM", 1))
+        paralellism = config().get("PARALLELISM", 1)
+        self.lrg = build_lr_graph_from_model(model, parallelism=paralellism)
         dot_str = lr_to_dot(self.lrg)
         configure_custom_logic_nodes(self.lrg)
         src = Source(dot_str)
-        src.render(f"./lr_graph_{self.model.name}", format="svg", view=True)
+        src.render(f"./lr_graph_{self.model.name}_{paralellism}", format="svg", view=False)
         
         self.inp_hwi, self.out_hwi = get_top_level_hw_interfaces(self.lrg)
         self.input_bitwidth_unpacked = self.inp_hwi.input_bitwidth
@@ -251,8 +251,8 @@ def extract_T_rows_from_stream(captured_rows: np.ndarray, T: int) -> np.ndarray:
 # The test
 # ============================================================
 
-# tb1 = TestTopSimpleTB(model=build_golden_model(model=m_with_qsum()))
-tb1 = TestTopSimpleTB(model=build_golden_model(model=m_testing_parallelism()))
+tb1 = TestTopSimpleTB(model=m_with_qsum_fixed_q_conf())
+# tb1 = TestTopSimpleTB(model=m_testing_parallelism())
 @cocotb.test()
 async def print_rtl_vs_keras_final_outputs_m_with_qsum(dut):
     # Clock
@@ -299,3 +299,4 @@ async def print_rtl_vs_keras_final_outputs_m_with_qsum(dut):
 
     dut._log.info("=== RTL OUTPUT (T x OUT_ELEMS) extracted from stream ===")
     dut._log.info("\n" + str(rtl_T_rows))
+    

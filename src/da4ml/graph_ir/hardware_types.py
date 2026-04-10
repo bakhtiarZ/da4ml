@@ -55,9 +55,9 @@ class HWInterface:
             self.comb_logic = node.logic_impl
             self.input_kif, self.output_kif = get_io_kifs(self.comb_logic)
             
-        self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
-        self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
-        self.input_item_size = math.prod(node.input_shapes[node.input_tids[0]]) 
+        self.input_bitwidth = int(sum(np.max(arr) for arr in self.input_kif))
+        self.output_bitwidth = int(sum(np.max(arr) for arr in self.output_kif))
+        self.input_item_size = math.prod(node.input_shapes[node.input_tids[0]])
         self.output_item_size = math.prod(node.output_shapes[node.output_tids[0]])
     
     def get_input_bw_is(self):
@@ -93,20 +93,21 @@ class QSumLogic(CustomLogic):
     def __repr__(self) -> str:
         return f"QSumLogic(opr={self.opr.operation.name}, axis_with_batch={self.axis_with_batch}, axis_without_batch={self.axis_without_batch})"
     
-    def configure(self, node):
+    def configure(self, node, debug=False):
         self.node = node
         self.node_id = node.op_id
         self.qsumgen = QSumGen(self.node, None, self.node_id, self.axis_without_batch)
-        self.qsumgen.configure()
+        self.qsumgen.configure(debug=debug)
         
         self.internal_comb_logic = self.qsumgen.internal_adder
         self.input_kif = self.qsumgen.input_kif
         self.output_kif = self.qsumgen.output_kif
-        self.input_bitwidth = sum(np.max(arr) for arr in self.input_kif)
-        self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
-        self.input_item_size = node.input_shapes[node.input_tids[0]][-1] 
-        self.output_item_size = node.output_shapes[node.output_tids[0]][-1]
-        print(f"\n\n DEBUG QSumLogic configured with input_kif: {self.input_kif}, output_kif: {self.output_kif}, input_bitwidth: {self.input_bitwidth}, output_bitwidth: {self.output_bitwidth}, input_item_size: {self.input_item_size}, output_item_size: {self.output_item_size}\n\n")
+        self.input_bitwidth = int(sum(np.max(arr) for arr in self.input_kif))
+        self.output_bitwidth = int(sum(np.max(arr) for arr in self.output_kif))
+        self.input_item_size = node.input_shapes[node.input_tids[0]]
+        self.output_item_size = node.output_shapes[node.output_tids[0]] 
+        if debug:
+            print(f"\n\n DEBUG QSumLogic configured with input_kif: {self.input_kif}, output_kif: {self.output_kif}, input_bitwidth: {self.input_bitwidth}, output_bitwidth: {self.output_bitwidth}, input_item_size: {self.input_item_size}, output_item_size: {self.output_item_size}\n\n")
     
     def generate_hw(self, project_dir) -> str:
         assert self.qsumgen is not None, "QSumGen is not configured. Please call configure(node) before generating hardware."
@@ -119,25 +120,25 @@ class QSumGen():
         self.node_id = node_id
         self.axis = axis
         
-    def configure(self):
+    def configure(self, debug=False):
         self.k = self.node.operation.iq.config.config['k0']
         self.i = self.node.operation.iq.config.config['i0']
         self.f = self.node.operation.iq.config.config['f0']
         self.input_bitwidth = int(self.k) + int(self.i) + int(self.f)
-        print(f"\n\n DEBUG k: {self.k}, i: {self.i}, f: {self.f}, input_bitwidth: {self.input_bitwidth}\n\n")
-        self.semantic_input_shape = _strip_batch_and_ensure_ints(self.node.op_repr.requires[0].shape)
         self.streaming_input_shape = self.node.input_shapes[self.node.input_tids[0]]
-        print(f"\n\n DEBUG semantic_input_shape: {self.semantic_input_shape}, streaming_input_shape: {self.streaming_input_shape}\n\n")
-        self.accum_count = int(self.semantic_input_shape[self.axis] / self.streaming_input_shape[self.axis])
         self.semantic_output_shape = _strip_batch_and_ensure_ints(self.node.op_repr.produces[0].shape)
         self.streaming_output_shape = self.node.output_shapes[self.node.output_tids[0]]
         self.input_item_size = math.prod(self.streaming_input_shape)
         self.output_item_size = math.prod(self.streaming_output_shape)
-        print(f"\n\n DEBUG semantic_input_shape: {self.semantic_input_shape}, semantic_output_shape: {self.semantic_output_shape}\n\n {self.streaming_input_shape} {self.streaming_output_shape}\n\n")
+        self.semantic_input_shape = _strip_batch_and_ensure_ints(self.node.op_repr.requires[0].shape)
+        self.accum_count = int(self.semantic_input_shape[self.axis] / self.streaming_input_shape[self.axis])    
         assert self.semantic_output_shape[self.axis] == 1, f"Currently only support summing to a single value along the reduction axis, semantic_output_shape: {self.semantic_output_shape}, axis = {self.axis}, semantic input shape: {self.semantic_input_shape}"
         assert self.streaming_output_shape[self.axis] == 1, f"Currently only support summing to a single value along the reduction axis, but got streaming_output_shape: {self.streaming_output_shape}"
-        self.accum_count = int(self.semantic_input_shape[self.axis] / self.streaming_input_shape[self.axis])    
-        print(f"\n\n DEBUG accum_count: {self.accum_count}\n\n")
+        if debug:
+            print(f"\n\n DEBUG k: {self.k}, i: {self.i}, f: {self.f}, input_bitwidth: {self.input_bitwidth}\n\n")
+            print(f"\n\n DEBUG semantic_input_shape: {self.semantic_input_shape}, streaming_input_shape: {self.streaming_input_shape}\n\n")
+            print(f"\n\n DEBUG semantic_input_shape: {self.semantic_input_shape}, semantic_output_shape: {self.semantic_output_shape}\n\n {self.streaming_input_shape} {self.streaming_output_shape}\n\n")
+            print(f"\n\n DEBUG accum_count: {self.accum_count}\n\n")
         self.module_port_names = {
             "clk": "clk",
             "rst": "rst",
@@ -151,36 +152,27 @@ class QSumGen():
         self._create_internal_adder()
 
     def _create_internal_adder(self):
-        # performs an adder tree reduction on the streamed inputs along the axis specified
-        axis_without_batch = self.axis - 1
-        # input_to_adder_shape = (
-        #     self.streaming_input_shape[:axis_without_batch]
-        #     + (self.streaming_input_shape[axis_without_batch] + 1,)
-        #     + self.streaming_input_shape[axis_without_batch + 1:]
-        # )
+     
         cursum_input_shape = self.semantic_output_shape        
-        
         def __get_output_quantisation_of_adder():
             inp = FixedVariableArrayInput(self.semantic_input_shape)
             inp = quantize(inp, self.k, self.i, self.f)
-            out = np.sum(inp, axis=axis_without_batch, keepdims=True)
+            out = np.sum(inp, axis=self.axis, keepdims=True)
             cl = comb_trace(inp, out)
             output_kif = get_io_kifs(cl)[1]
             k, i, f =  output_kif
-            print(f"\n\n DEBUG output quantization k: {k}, i: {i}, f: {f}\n\n")
             return max(k), max(i), max(f)
         
         output_k, output_i, output_f = __get_output_quantisation_of_adder()
         self.sum_reg_width = output_k + output_i + output_f 
         data_in = quantize(FixedVariableArrayInput(self.streaming_input_shape), self.k, self.i, self.f)
         cur_sum = quantize(FixedVariableArrayInput(cursum_input_shape), output_k, output_i, output_f)
-        data_in_and_cursum = np.concatenate([data_in, cur_sum], axis=axis_without_batch)
-        out = quantize(np.sum(data_in_and_cursum, axis=axis_without_batch, keepdims=True), output_k, output_i, output_f)
+        data_in_and_cursum = np.concatenate([data_in, cur_sum], axis=self.axis)
+        out = quantize(np.sum(data_in_and_cursum, axis=self.axis, keepdims=True), output_k, output_i, output_f)
         self.internal_adder = comb_trace(data_in_and_cursum, out)
         total_inp_kif, self.output_kif = get_io_kifs(self.internal_adder)
         self.input_kif = total_inp_kif[:,:-1]
-        self.output_bitwidth = sum(np.max(arr) for arr in self.output_kif)
-        # print(f"\n\n DEBUG internal adder output_kif: {self.output_kif}, output_bitwidth: {self.output_bitwidth}\n\n")
+        self.output_bitwidth = int(sum(np.max(arr) for arr in self.output_kif))
     
     def _create_preamble(self):
         module_definition = (" module QSum #() (\n" 
@@ -197,10 +189,9 @@ class QSumGen():
     
     def _write_body_of_module(self):
         adder_name = self.adder_instance_name
-        # print(f"\n\n DEBUG accum_count: {self.accum_count}, input_bitwidth: {self.input_bitwidth}, input_item_size: {self.input_item_size}, output_bitwidth: {self.output_bitwidth}, output_item_size: {self.output_item_size}\n\n`")
         count_w = 1 if self.accum_count <= 1 else math.ceil(math.log2(self.accum_count + 1))
-        input_width = self.input_bitwidth * self.input_item_size
-        output_width = self.output_bitwidth * self.output_item_size
+        packed_input_width = self.input_bitwidth * self.input_item_size
+        packed_output_width = self.output_bitwidth * self.output_item_size
         lines = (
             f"    localparam logic [{count_w-1}:0] COUNT_MINUS_ONE = {self.accum_count - 1};\n"
             f"    localparam logic [{count_w-1}:0] COUNT_VALUE     = {self.accum_count};\n"
@@ -209,12 +200,12 @@ class QSumGen():
             f"    logic [{count_w-1}:0] count_reg;\n"
             f"    logic full_reg;\n"
             f"\n"
-            f"    logic [{output_width - 1}:0] adder_result;\n"
+            f"    logic [{packed_output_width - 1}:0] adder_result;\n"
             f"    logic accept_input;\n"
             f"    logic accept_output;\n"
             f"    logic last_input;\n"
             f"\n"
-            f"    logic [{input_width + output_width - 1}:0] packed_operands; assign packed_operands = {{{self.module_port_names['data_in']}, sum_reg}};\n"
+            f"    logic [{packed_input_width + packed_output_width - 1}:0] packed_operands; assign packed_operands = {{{self.module_port_names['data_in']}, sum_reg}};\n"
             f"    mod_{adder_name} #(\n"
             f"    ) {adder_name}_inst (\n"
             f"        .model_inp(packed_operands),\n"

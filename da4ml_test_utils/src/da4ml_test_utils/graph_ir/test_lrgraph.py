@@ -191,6 +191,5 @@ def test_parallelism_write_rtl_from_lrgraph(model):
 
 # test_write_rtl_from_lrgraph(simple_qsum())
 # test_write_rtl_from_lrgraph(model=two_layer_model())
-test_parallelism_write_rtl_from_lrgraph(model=two_layer_model())
 # test_parallelism_build_lrgraph_from_model(m_testing_parallelism())
 

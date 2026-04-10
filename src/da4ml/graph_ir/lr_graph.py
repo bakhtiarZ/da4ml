@@ -69,19 +69,27 @@ def _streaming_shapes_for_op(
     if opr.operation.__class__ is keras.layers.InputLayer or not opr.requires:
         out_no_batch_int = _strip_batch_and_ensure_ints(opr.produces[0].shape) 
         return out_no_batch_int, out_no_batch_int
-
-    in_no_batch_int = _strip_batch_and_ensure_ints(opr.requires[0].shape)
-    out_no_batch_int = _strip_batch_and_ensure_ints(opr.produces[0].shape)
+    assert len(opr.requires) == 1, "Multiple inputs not supported for keras operations right now"
+    semantic_input_shape = _strip_batch(opr.requires[0].shape)
+    semantic_output_shape = _strip_batch(opr.produces[0].shape)
     
+    in_no_batch_int = _strip_batch_and_ensure_ints(semantic_input_shape)
+    out_no_batch_int = _strip_batch_and_ensure_ints(semantic_output_shape)
+
     if schedule is None:
         return in_no_batch_int, out_no_batch_int
+    
     min_in_no_batch = schedule.minimum_input_shape(in_no_batch_int, **kwargs)
     min_out_no_batch = schedule.minimum_output_shape(out_no_batch_int, **kwargs)
     min_in = tuple(min_in_no_batch)
     min_out = tuple(min_out_no_batch)
 
-    streamed_in_no_batch = (min_in[0] * parallelism, *min_in[1:])
-    streamed_out_no_batch = (min_out[0] * parallelism, *min_out[1:])
+    parallel_in_no_batch = (min_in[0] * parallelism, *min_in[1:])
+    parallel_out_no_batch = (min_out[0] * parallelism, *min_out[1:])
+    
+    streamed_in_no_batch = tuple(min(i, j) for i, j in zip(parallel_in_no_batch, in_no_batch_int))
+    streamed_out_no_batch = tuple(min(i, j) for i, j in zip(parallel_out_no_batch, out_no_batch_int))
+    
     return streamed_in_no_batch, streamed_out_no_batch
 
 
@@ -94,7 +102,7 @@ def create_comb_logic_from_oprepr(
     min_in_shape, min_out_shape = _streaming_shapes_for_op(opr, schedule, parallelism=parallelism)
 
     # Build a minimal model around this operation
-    min_inp = keras.Input(shape=min_in_shape) # Keras Input excludes batch dimension, but our shapes include batch=1, so we use min_in_shape[1:] here
+    min_inp = keras.Input(shape=min_in_shape)
     out = opr.operation(min_inp)
     min_model = keras.Model(min_inp, out)
 
@@ -396,10 +404,10 @@ def create_buffer(packed_bitwidth, r_edge):
 def get_top_level_interface(lrg: LRGraph):
     first_node = lrg.logic_nodes[1] # skip input
     fnhwi = HWInterface(first_node)
-    packed_input_bw = math.prod(fnhwi.get_input_bw_is())
+    packed_input_bw = math.prod([int(bw) for bw in fnhwi.get_input_bw_is()])
     last_node = lrg.logic_nodes[max(lrg.logic_nodes.keys()) - 1] # skip output
     lnhwi = HWInterface(last_node)
-    packed_output_bw = math.prod(lnhwi.get_output_bw_is())
+    packed_output_bw = math.prod([int(bw) for bw in lnhwi.get_output_bw_is()])
     return packed_input_bw, packed_output_bw
 
 def create_preamble(name, lr):

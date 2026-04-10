@@ -7,7 +7,9 @@ import keras
 
 
 def config():
-    return {"PARALLELISM": 2}
+    return {"PARALLELISM": 2,
+            "Q_CONF": QuantizerConfig(heterogeneous_axis=(), k0=1, i0=4, f0=3),
+            }
 
 def simple_qsum():
     i = keras.Input((3, 1))
@@ -16,19 +18,27 @@ def simple_qsum():
     return m
 
 def m_with_qsum():
-    i = keras.Input((3,1))
-    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(i) # 3, 1
-    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=True)(d0) # 1, 1
+    i = keras.Input((4,2))
+    d0 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros', enable_iq=True, enable_oq=True)(i) # 4, 1
+    s = QSum(iq_conf=QuantizerConfig(heterogeneous_axis=()), axes=1, scale=1, keepdims=True, enable_iq=True)(d0) # 1, 1
     m = keras.Model(i, s)
     return m
 
 def m_testing_parallelism():
     i = keras.Input((4,2))
-    d0 = QDense(2, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(i) # 4, 2
-    d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros')(d0) # 4, 2
+    d0 = QDense(2, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros', enable_iq=True, enable_oq=True)(i) # 4, 2
+    d1 = QDense(1, iq_conf=QuantizerConfig(heterogeneous_axis=()), kernel_initializer='ones', bias_initializer='zeros', enable_iq=True)(d0) # 4, 2
     m = keras.Model(i, d1)
     return m
 
+def m_with_qsum_fixed_q_conf():
+    cf = config()
+    q = cf["Q_CONF"]
+    i = keras.Input((4,2))
+    d0 = QDense(1, iq_conf=q, oq_conf=q, kernel_initializer='ones', bias_initializer='zeros', enable_iq=True, enable_oq=True)(i) # 4, 1
+    s = QSum(iq_conf=q, axes=1, scale=1, keepdims=True, enable_iq=True)(d0) # 1, 1
+    m = keras.Model(i, s)
+    return m
 
 def generate_qsum_hw(lrg, dir):
     logic_impl = lrg.logic_nodes[1].logic_impl
