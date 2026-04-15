@@ -177,14 +177,61 @@ def m_with_qsum_and_fixed_conf():
     m.name = "model_with_qsum_and_fixed_conf"
     return m
 
-def big_m_with_qsum_and_fixed_conf():
+# def big_m_with_qsum_and_fixed_conf():
+#     qconf = QuantizerConfig(heterogeneous_axis=(), k0=1, i0=4, f0=3)
+#     i = keras.Input((64,2))
+#     d0 = QDense(1, iq_conf=qconf, oq_conf = qconf, kernel_initializer='ones', bias_initializer='zeros', enable_iq = True, enable_oq = True)(i) # 4, 1
+#     s = QSum(iq_conf=qconf, axes=1, scale=1, keepdims=True, enable_iq = True)(d0) # 1, 1
+#     m = keras.Model(i, s)
+#     m.name = "model_with_qsum_and_fixed_conf"
+#     return m
+
+def m():
     qconf = QuantizerConfig(heterogeneous_axis=(), k0=1, i0=4, f0=3)
-    i = keras.Input((64,2))
-    d0 = QDense(1, iq_conf=qconf, oq_conf = qconf, kernel_initializer='ones', bias_initializer='zeros', enable_iq = True, enable_oq = True)(i) # 4, 1
-    s = QSum(iq_conf=qconf, axes=1, scale=1, keepdims=True, enable_iq = True)(d0) # 1, 1
-    m = keras.Model(i, s)
+    i = keras.Input((4,2))
+    s = QSum(iq_conf=qconf, axes=1, scale=1, keepdims=True, enable_iq = True)(i) # 1, 1
+    d0 = QDense(1, iq_conf=qconf, oq_conf = qconf, kernel_initializer='ones', bias_initializer='zeros', enable_iq = True, enable_oq = True)(s) # 4, 1
+    m = keras.Model(i, d0)
     m.name = "model_with_qsum_and_fixed_conf"
     return m
+
+
+def do_st(m):
+    i = FixedVariableArrayInput(shape=(4,2))
+    o = m(i)
+    
+    
+
+
+"""
+
+FORCE l1 k1 i4 f3
+
+"""
+
+"""
+
+kifs = 1,1,1
+
+1, 16, 6
+
+
+
+
+"""
+
+
+
+"""
+
+
+i -> Sum -> Dense
+  1,2    1,1
+ 
+
+"""
+
+
 
 # m = m_with_qsum()
 # print_quantisation_info(m)
