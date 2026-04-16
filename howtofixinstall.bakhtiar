@@ -1,0 +1,149 @@
+Here’s a **short, saveable cheat-sheet** you can copy into a note or README.
+It’s minimal and tailored exactly to your `da4ml + conda + meson-python` setup.
+
+---
+
+# da4ml Editable Install (Meson / Conda) – Quick Guide
+
+### Environment
+
+* Conda env: `hgq2`
+* Python: 3.12
+* Source dir: `/mnt/ccnas2/bdp/bm920/da4ml`
+* Build dir: `/mnt/ccnas2/bdp/bm920/da4ml/build/cp312`
+
+---
+
+## One-time setup (per env & Python version)
+
+```bash
+conda activate hgq2
+
+# Clean old installs if needed
+pip uninstall -y da4ml
+rm -rf $CONDA_PREFIX/lib/python3.12/site-packages/*da4ml*
+
+# Editable install from repo root
+cd /mnt/ccnas2/bdp/bm920/da4ml
+pip install -e .
+
+# Initialize Meson build (THIS IS THE KEY STEP)
+rm -rf build/cp312
+meson setup build/cp312 . -Dbuildtype=release -Db_ndebug=if-release
+ninja -C build/cp312
+```
+
+---
+
+## Normal daily use (no rebuild needed)
+
+```bash
+python -c "import da4ml; print(da4ml.__file__)"
+```
+
+If it imports cleanly → you’re done.
+
+---
+
+## Rebuild only when needed
+
+### If you change C++ / native code
+
+```bash
+ninja -C build/cp312
+```
+
+### If Meson config changes or build breaks
+
+```bash
+meson setup build/cp312 . --wipe
+ninja -C build/cp312
+```
+
+---
+
+## Common failure & fix
+
+### ❌ Error on import:
+
+```
+ImportError: re-building the da4ml meson-python editable wheel package failed
+```
+
+### ✅ Fix:
+
+```bash
+ls build/cp312/build.ninja || (
+  meson setup build/cp312 . -Dbuildtype=release -Db_ndebug=if-release &&
+  ninja -C build/cp312
+)
+```
+
+---
+
+## Useful alias (optional)
+
+```bash
+alias da4ml-rebuild="ninja -C /mnt/ccnas2/bdp/bm920/da4ml/build/cp312"
+```
+
+---
+
+## Mental model (1 line)
+
+> **Editable Meson package = Python import hook + pre-existing Meson build dir**
+
+No build dir → import fails. Build once → works forever (per env).
+
+---
+
+If you want, I can condense this even further into a **10-line “emergency fix” block** or adapt it for your `~/workspace` path instead of `/mnt`.
+
+
+
+
+
+
+Here’s the **ultra-minimal 10-line “emergency fix” version** you can paste anywhere and run when things break 👇
+
+---
+
+# da4ml Editable Install – 10-Line Fix
+
+```bash
+conda activate hgq2
+pip uninstall -y da4ml
+rm -rf $CONDA_PREFIX/lib/python3.12/site-packages/*da4ml*
+
+cd /mnt/ccnas2/bdp/bm920/da4ml
+pip install -e .
+
+rm -rf build/cp312
+meson setup build/cp312 . -Dbuildtype=release -Db_ndebug=if-release
+ninja -C build/cp312
+
+python -c "import da4ml; print(da4ml.__file__)"
+```
+
+---
+
+### When to use this
+
+* `ImportError: re-building the da4ml meson-python editable wheel package failed`
+* `ninja` runs but `build.ninja` is missing
+* build dir got deleted on the cluster
+
+### When *not* to use it
+
+* You only changed Python code → **don’t rebuild**
+* Import already works → **don’t touch it**
+
+---
+
+If you want, I can also give you:
+
+* a **one-liner** rebuild
+* a version that **forces gcc / disables ccache**
+* or a **README-ready** Markdown snippet
+
+Just say which one.
