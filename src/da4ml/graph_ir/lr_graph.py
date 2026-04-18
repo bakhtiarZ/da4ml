@@ -10,16 +10,26 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Set
 import keras
 from pathlib import Path
 
-from da4ml.cmvm.types import CombLogic
+from da4ml.cmvm import CombLogic 
+
 from da4ml.trace import FixedVariableArrayInput, comb_trace
 from da4ml.converter import trace_model
 from da4ml.codegen.rtl.rtl_model import RTLModel, get_io_kifs
+from da4ml.trace.fixed_variable_array import FixedVariableArray
+from hgq._dais_tracer.layers._base import mirror_quantizer
 
 from .hardware_types import PortConnection, HWInterface, PureLogic, CustomLogic, RoutingLogic
 from .schedules.scheduling import DataSchedule, _SCHEDULE_REGISTRY
-from .util import _strip_batch_and_ensure_ints, parse_model, OpRepr, _flatten_ops, short_tid, _short_tid, _strip_batch
-
-
+from .util import _strip_batch_and_ensure_ints, parse_model, OpRepr, _flatten_ops, short_tid, _short_tid, _strip_batch, convert_kif_to_streaming_shape
+@dataclass
+class LayerQuantisationConfig:
+    name: str
+    post_iq: FixedVariableArray
+    post_call: FixedVariableArray
+    final: FixedVariableArray
+    next_iq: Any
+    
+    
 @dataclass
 class RoutingEdge:
     tid: int
@@ -38,6 +48,7 @@ class LogicNode:
     operation: Optional[keras.Operation]
     op_repr: Optional[OpRepr]
 
+    quant_config: LayerQuantisationConfig
     logic_impl: CombLogic | CustomLogic | PureLogic
 
     input_tids: List[int]
@@ -45,9 +56,8 @@ class LogicNode:
 
     input_shapes: Dict[int, Tuple[int, ...]] = field(default_factory=dict)
     output_shapes: Dict[int, Tuple[int, ...]] = field(default_factory=dict)
-    logic_wrapper: Optional[CustomLogic] = None
 
-
+    
 @dataclass
 class LRGraph:
     logic_nodes: Dict[int, LogicNode]
@@ -96,22 +106,29 @@ def _streaming_shapes_for_op(
 def create_comb_logic_from_oprepr(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
+    quant_config: LayerQuantisationConfig,
     parallelism: int = 1,
 ) -> Tuple[CombLogic | PureLogic, Tuple[int, ...], Tuple[int, ...]]:
-    
+ 
+   
     min_in_shape, min_out_shape = _streaming_shapes_for_op(opr, schedule, parallelism=parallelism)
-
-    # Build a minimal model around this operation
+    # # Build a minimal model around this operation
     min_inp = keras.Input(shape=min_in_shape)
     out = opr.operation(min_inp)
     min_model = keras.Model(min_inp, out)
+    
+    input_kifs = convert_kif_to_streaming_shape(quant_config.post_iq[0].kif, min_in_shape[0])
+    fxinp = FixedVariableArray.from_kif(*input_kifs)
+    inp, tr_out = trace_model(min_model, inputs=fxinp)
+    if quant_config.next_iq is not None:
+        tr_out = mirror_quantizer(quant_config.next_iq, out)
+    logic = comb_trace(inp, tr_out)
+    # # Trace
+    # fx_inp = FixedVariableArrayInput(shape=min_in_shape)  # includes batch=1
+    # tr_in, tr_out = trace_model(min_model, inputs=fx_inp)
+    # logic = comb_trace(tr_in, tr_out)
 
-    # Trace
-    fx_inp = FixedVariableArrayInput(shape=min_in_shape)  # includes batch=1
-    tr_in, tr_out = trace_model(min_model, inputs=fx_inp)
-    logic = comb_trace(tr_in, tr_out)
-
-    # Validate output shape if possible (remove batch from out.shape)
+    # # Validate output shape if possible (remove batch from out.shape)
     out_no_batch_int = _strip_batch_and_ensure_ints(out.shape)
     if out_no_batch_int != min_out_shape:
         raise AssertionError(
@@ -124,6 +141,7 @@ def create_comb_logic_from_oprepr(
 def create_logic_impl_from_oprepr(
     opr: OpRepr,
     schedule: Optional[DataSchedule],
+    quant_config: LayerQuantisationConfig,
     parallelism: int = 1,
 ) -> CombLogic | PureLogic | CustomLogic:
     
@@ -133,13 +151,13 @@ def create_logic_impl_from_oprepr(
         return PureLogic(opr=opr), shp, shp
     
     elif issubclass(schedule.hardware_type, CustomLogic):
-        logic_impl = schedule.hardware_type(opr)
+        logic_impl = schedule.hardware_type(opr, quant_config)
         axes_without_batch = tuple(axis - 1 for axis in opr.operation.axes) if opr.operation.axes is not None else None
         min_in_shape, min_out_shape = _streaming_shapes_for_op(opr, schedule, parallelism=parallelism, axes=axes_without_batch)
         return logic_impl, min_in_shape, min_out_shape
     
     elif schedule.hardware_type == CombLogic:
-        return create_comb_logic_from_oprepr(opr, schedule, parallelism=parallelism)
+        return create_comb_logic_from_oprepr(opr, schedule, quant_config, parallelism=parallelism)
     
     else:
         raise AssertionError(f"Hardware type is not recognised opr class: {opr.operation.__class__}, schedule hardware type: {schedule.hardware_type}")
@@ -148,6 +166,7 @@ def create_logic_impl_from_oprepr(
 def build_lr_graph_from_parsed(
     parsed: List[List[OpRepr]],
     *,
+    layerQConfigs: dict[str, LayerQuantisationConfig],
     model_inputs: Optional[Sequence[keras.KerasTensor]] = None,
     model_outputs: Optional[Sequence[keras.KerasTensor]] = None,
     parallelism: int = 1,
@@ -194,11 +213,12 @@ def build_lr_graph_from_parsed(
         in_tids = [id(t) for t in in_ts]
         out_tids = [id(t) for t in out_ts]
 
-        logic_impl, min_in_shape, min_out_shape = create_logic_impl_from_oprepr(opr, schedule, parallelism=parallelism)
+        logic_impl, min_in_shape, min_out_shape = create_logic_impl_from_oprepr(opr, schedule, layerQConfigs[f"{opr.operation.name}"], parallelism=parallelism)
         node = LogicNode(
             op_id=op_id,
             operation=opr.operation,
             op_repr=opr,
+            quant_config=layerQConfigs[opr.operation.name],
             logic_impl=logic_impl,
             input_tids=in_tids,
             output_tids=out_tids,
@@ -253,28 +273,50 @@ def build_lr_graph_from_parsed(
 
     # Append a pure output node that consumes model outputs
     if lr.model_output_tids:
-        append_pure_output_node(lr, output_tids=lr.model_output_tids)
+        append_pure_output_node(lr, layerQConfigs=layerQConfigs, output_tids=lr.model_output_tids)
 
     return lr
 
 
+
+def _build_layer_quantisation_configs(model: keras.Model, dump: dict[str, FixedVariableArray]):
+    layerQConfigs = {}
+    for i, l in enumerate(model.layers):
+        next_iq = model.layers[i+1].iq if i+1 != len(model.layers) else None
+        if i == 0:
+            layerQConfigs[l.name] = dump["inputs"]
+        else:
+            layerQConfigs[l.name] = LayerQuantisationConfig(
+                name=l.name,
+                post_iq = dump[f"/{l.name}/post_iq"],
+                post_call = dump[f"/{l.name}/post_call"],
+                final = dump[f"/{l.name}/final"],
+                next_iq = next_iq
+            )
+            
+    return layerQConfigs
+    
+    
 def build_lr_graph_from_model(model: keras.Model, parallelism: int = 1) -> LRGraph:
     """
     Convenience wrapper that calls parse_model(model) then builds LRGraph.
     """
     if isinstance(model, keras.Sequential):
         model = model._functional
-
+    dump = trace_model(model, dump=True)
+    layerQConfigs = _build_layer_quantisation_configs(model, dump)
+    layerQConfigs["final"] = dump["final"]
     parsed = parse_model(model)
     return build_lr_graph_from_parsed(
         parsed,
+        layerQConfigs=layerQConfigs,
         model_inputs=model.inputs,
         model_outputs=model.outputs,
         parallelism=parallelism,
     )
 
 
-def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
+def append_pure_output_node(lr: LRGraph, *, layerQConfigs, output_tids: List[int]) -> int:
     """
     Create a final PureLogic node that consumes the model outputs.
     """
@@ -313,6 +355,7 @@ def append_pure_output_node(lr: LRGraph, *, output_tids: List[int]) -> int:
         op_id=out_node_id,
         operation=None,
         op_repr=None,
+        quant_config=layerQConfigs["final"],
         logic_impl=PureLogic(opr=None),
         input_tids=list(output_tids),
         output_tids=[],

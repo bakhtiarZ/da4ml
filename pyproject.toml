@@ -18,15 +18,16 @@ keywords = [
   "CMVM",
   "distributed arithmetic",
   "high-level synthesis",
+  "HLS Complier",
   "machine learning",
-  "RTL/HLS compilation",
+  "RTL Generator",
 ]
 
 license = { text = "GNU Lesser General Public License v3 (LGPLv3)" }
 authors = [ { name = "Chang Sun", email = "chsun@cern.ch" } ]
 requires-python = ">=3.10"
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3 :: Only",
@@ -35,19 +36,28 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
-  # "Programming Language :: Python :: 3.14",
 ]
 dynamic = [ "version" ]
-dependencies = [ "llvmlite>=0.44", "numba>=0.61", "quantizers>=1,<2" ]
+dependencies = [ "numpy>=2", "quantizers>=1,<2" ]
 optional-dependencies.docs = [
-  "hgq2",
   "myst-parser",
   "pyparsing",
   "sphinx",
   "sphinx-rtd-theme",
 ]
+optional-dependencies.tests = [
+  "pytest",
+  "pytest-cov",
+  "pytest-env",
+  "pytest-sugar",
+  "pytest-xdist",
+]
 urls.repository = "https://github.com/calad0i/da4ml"
 scripts.da4ml = "da4ml._cli:main"
+entry-points."dais_tracer.plugins".da4ml = "da4ml.converter.example:ExampleDAISTracer"
+
+[tool.meson-python]
+limited-api = true
 
 [tool.ruff]
 target-version = "py310"
@@ -67,3 +77,18 @@ lint.ignore = [ "E501", "E731", "E741", "F403", "F405" ]
 lint.explicit-preview-rules = true
 lint.fixable = [ "ALL" ]
 lint.unfixable = [  ]
+
+[tool.pytest.ini_options]
+env = [ "DA_DEFAULT_THREADS=1" ]
+
+addopts = [
+  "--import-mode=importlib",
+  "--cov=src/da4ml",
+  "--cov-report=xml",
+  "--cov-report=html",
+]
+
+[tool.coverage.report]
+exclude_also = [ 'no cover: start(?s:.)*?no cover: stop', 'raise ValueError' ]
+[tool.coverage.run]
+omit = [ "*/_version.py", "src/da4ml/_cli/*.py" ]

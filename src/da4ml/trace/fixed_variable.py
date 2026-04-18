@@ -6,15 +6,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 from hashlib import sha256
 from math import ceil, floor, log2
-from typing import NamedTuple, overload
+from typing import Any, NamedTuple, overload
 from uuid import UUID
 
 import numpy as np
 from numpy.typing import NDArray
 
-from ..cmvm.core import cost_add
-from ..cmvm.types import QInterval, _minimal_kif
-from ..cmvm.util.bit_decompose import _shift_centering
+from .._binary.cmvm_bin import cost_add, get_lsb_loc
+from ..types import QInterval, minimal_kif
 
 rd = random.Random()
 
@@ -67,11 +66,11 @@ class TableSpec:
 
     @property
     def out_kif(self) -> tuple[bool, int, int]:
-        return _minimal_kif(self.out_qint)
+        return minimal_kif(self.out_qint)
 
 
 def to_spec(table: NDArray[np.floating]) -> tuple[TableSpec, NDArray[np.int32]]:
-    f_out = -_shift_centering(np.array(table))
+    f_out = max(-get_lsb_loc(float(x)) for x in table.ravel())
     int_table = (table * 2**f_out).astype(np.int32)
     h = sha256(int_table.data)
     h.update(f'{f_out}'.encode())
@@ -80,12 +79,30 @@ def to_spec(table: NDArray[np.floating]) -> tuple[TableSpec, NDArray[np.int32]]:
     return TableSpec(hash=h.hexdigest(), inp_width=inp_width, out_qint=out_qint), int_table
 
 
+@overload
 def interpret_as(
-    x: int | NDArray[np.integer],
+    x: NDArray[np.integer],
     k: int,
     i: int,
     f: int,
-) -> float | NDArray[np.floating]:
+) -> NDArray[np.floating]: ...
+
+
+@overload
+def interpret_as(
+    x: int,
+    k: int,
+    i: int,
+    f: int,
+) -> float: ...
+
+
+def interpret_as(
+    x: Any,
+    k: int,
+    i: int,
+    f: int,
+) -> Any:
     b = k + i + f
     bias = 2.0 ** (b - 1) * k
     eps = 2.0**-f
@@ -111,7 +128,7 @@ class LookupTable:
 
     def lookup(self, var, qint_in: QInterval | tuple[float, float, float]):
         if isinstance(var, FixedVariable):
-            return var.lookup(self)
+            return var.lookup(self, original_qint=qint_in)
         else:
             _min, _max, _step = qint_in
             assert _min <= var <= _max, f'Value {var} out of range [{_min}, {_max}]'
@@ -150,7 +167,7 @@ class LookupTable:
         return cls(table, spec=spec)
 
     def _get_pads(self, qint: QInterval) -> tuple[int, int]:
-        k, i, f = _minimal_kif(qint)
+        k, i, f = minimal_kif(qint)
         if k:
             pad_left = round((qint.min + 2**i) / qint.step)
         else:
@@ -159,21 +176,33 @@ class LookupTable:
         pad_right = size - len(self.table) - pad_left
         return pad_left, pad_right
 
-    def padded_table(self, qint: QInterval) -> NDArray[np.int32]:
-        pad_left, pad_right = self._get_pads(qint)
-        data = np.pad(self.table, (pad_left, pad_right), mode='constant', constant_values=0)
-        if qint.min < 0:
+    def padded_table(self, key_qint: QInterval) -> NDArray[np.float64]:
+        pad_left, pad_right = self._get_pads(key_qint)
+        data = np.pad(self.table.astype(np.float64), (pad_left, pad_right), mode='constant', constant_values=np.nan)
+        if key_qint.min < 0:
             size = len(data)
-            # data = np.concatenate((data[size // 2 :], data[: size // 2]))
             data = np.roll(data, size // 2)
         return data
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, LookupTable):
+            return False
+        return self.spec == other.spec and np.array_equal(self.table, other.table)
+
+    def __len__(self) -> int:
+        return len(self.table)
+
+    def __getitem__(self, item) -> 'LookupTable':
+        table = self.float_table[item]
+        _table, _spec = to_spec(table)
+        return LookupTable(_spec, _table)
 
 
 def _const_f(const: float | Decimal):
     """Get the minimum f such that const * 2^f is an integer."""
     const = float(const)
     if const == 0:
-        return 0
+        return -32
     _low, _high = -32, 32
     while _high - _low > 1:
         _mid = (_high + _low) // 2
@@ -201,6 +230,35 @@ def to_csd_powers(x: float) -> Generator[float, None, None]:
         x -= v
         if v != 0:
             yield v * s
+
+
+def _binary_bit_op(a: float, b: float, op: int, qint0: QInterval, qint1: QInterval, qint: QInterval):
+    _fn = {0: lambda x, y: x & y, 1: lambda x, y: x | y, 2: lambda x, y: x ^ y}[op]
+    assert isinstance(a, float) and isinstance(b, float)
+    assert qint0 is not None and qint1 is not None and qint is not None
+    k, i, f = minimal_kif(qint)
+    step = min(qint0.step, qint1.step)
+    _a, _b = round(a / step), round(b / step)
+    return interpret_as(_fn(_a, _b), k, i, f)
+
+
+def _unary_bit_op(a: float, op: int, qint_from: QInterval, qint_to: QInterval | None = None) -> float:
+    assert isinstance(a, float)
+    assert qint_from is not None
+    k, i, f = minimal_kif(qint_from) if qint_from.min != 0 or qint_from.max != 0 else (False, 1, 0)
+    _a = round(a / qint_from.step)
+    match op:
+        case 0:
+            if not qint_to:
+                return interpret_as(~_a, k, i, f)
+            kk, ii, ff = minimal_kif(qint_to)
+            return interpret_as((~_a) % 2 ** (k + i + f), kk, ii, ff)
+        case 1:
+            return float(_a != 0)
+        case 2:
+            return float(_a == qint_from.max) if qint_from.min >= 0 else float(_a == -1)
+        case _:
+            raise ValueError(f'Invalid unary bit op {op}')
 
 
 class FixedVariable:
@@ -330,6 +388,17 @@ class FixedVariable:
             if self.opr == 'relu':
                 _cost += sum(self.kif) / 2
 
+        elif self.opr == 'bit_binary':
+            _cost = sum(self.kif) * 0.2
+            _latency = 1.0 + max(v.latency for v in self._from)
+
+        elif self.opr == 'bit_unary':
+            if self._data == 0:
+                _cost = 0.0
+                _latency = self._from[0].latency
+            else:
+                _cost = sum(self._from[0].kif) / 6
+                _latency = 1.0 + max(v.latency for v in self._from)
         elif self.opr == 'new':
             # new variable, no cost
             _latency = 0.0
@@ -351,12 +420,17 @@ class FixedVariable:
         if self.step == 0:
             return False, 0, 0
         f = -int(log2(self.step))
-        i = ceil(log2(max(-self.low, self.high + self.step)))
+        xx = max(-self.low, self.high + self.step)
+        if xx <= 0:
+            pass
+        i = ceil(log2(xx))
         k = self.low < 0
         return k, i, f
 
     @classmethod
     def from_const(cls, const: float | Decimal, hwconf: HWConfig, _factor: float | Decimal = 1):
+        if const.__class__ is not Decimal:
+            const = float(const)
         return cls(const, const, -1, hwconf=hwconf, opr='const', _factor=_factor)
 
     def __repr__(self) -> str:
@@ -454,7 +528,10 @@ class FixedVariable:
             assert other.high == other.low
             other = float(other.low)
 
-        if other == 0:
+        if self.high == self.low:
+            return self.from_const(float(self.low) * float(other), hwconf=self.hwconf)
+
+        if np.all(other == 0):
             return FixedVariable(0, 0, 1, hwconf=self.hwconf, opr='const')
 
         if log2(abs(other)) % 1 == 0:
@@ -464,12 +541,18 @@ class FixedVariable:
         while len(variables) > 1:
             v1, p1 = variables.pop()
             v2, p2 = variables.pop()
+
             v, p = v1 + v2, p1 + p2
             if p > 0:
                 high, low = self.high * p, self.low * p
             else:
                 high, low = self.low * p, self.high * p
-            v.high, v.low = high, low
+            low, high = float(low), float(high)
+            step = float(v.step)
+
+            k = low < 0
+            i = ceil(log2(max(-low, high + step)))
+            v = v.quantize(k, i, -int(log2(step)))
             variables.append((v, p))
         return variables[0][0]
 
@@ -576,7 +659,9 @@ class FixedVariable:
         if step > self.step and round_mode == 'RND':
             return (self + step / 2).relu(i, f, 'TRN')
         low = max(Decimal(0), self.low)
-        high = max(Decimal(0), self.high)
+        high = self.high
+        high, low = floor(high / step) * step, floor(low / step) * step
+
         if i is not None:
             _high = Decimal(2) ** i - step
             if _high < high:
@@ -584,6 +669,7 @@ class FixedVariable:
                 low = Decimal(0)
                 high = _high
         _factor = self._factor
+        high = max(Decimal(0), high)
 
         if self.low == low and self.high == high and self.step == step:
             return self
@@ -606,6 +692,7 @@ class FixedVariable:
         f: int,
         overflow_mode: str = 'WRAP',
         round_mode: str = 'TRN',
+        _force_factor_clear=False,
     ) -> 'FixedVariable':
         """Quantize the variable to the specified fixed-point format.
 
@@ -621,6 +708,8 @@ class FixedVariable:
             Overflow mode, one of 'WRAP', 'SAT', 'SAT_SYM', by default 'WRAP'
         round_mode : str, optional
             Rounding mode, one of 'TRN' (truncate), 'RND' (round to nearest, half up), by default 'TRN'
+        _force_factor_clear : bool, optional
+            Whether to force clear the scaling factor (set to 1) in the output variable, by default False.
         """
 
         overflow_mode, round_mode = overflow_mode.upper(), round_mode.upper()
@@ -631,7 +720,7 @@ class FixedVariable:
             return FixedVariable(0, 0, 1, hwconf=self.hwconf, opr='const')
         _k, _i, _f = self.kif
 
-        if k >= _k and i >= _i and f >= _f:
+        if k >= _k and i >= _i and f >= _f and not _force_factor_clear:
             if overflow_mode != 'SAT_SYM' or i > _i:
                 return self
 
@@ -669,7 +758,7 @@ class FixedVariable:
         if i + k + f <= 0:
             return FixedVariable(0, 0, 1, hwconf=self.hwconf, opr='const')
 
-        low = -k * Decimal(2) ** i
+        low = -int(k) * Decimal(2) ** i
 
         high = Decimal(2) ** i - step
         _low, _high = self.low, self.high
@@ -700,39 +789,65 @@ class FixedVariable:
         self,
         a: 'FixedVariable|float|Decimal',
         b: 'FixedVariable|float|Decimal',
-        qint: tuple[Decimal, Decimal, Decimal] | None = None,
+        qint: tuple[float, float, float] | None = None,
+        zt_sensitive: bool = True,
     ):
         """If the MSB of this variable is 1, return a, else return b.
         When the variable is signed, the MSB is determined by the sign bit (1 for <0, 0 for >=0)
         """
+
         if not isinstance(a, FixedVariable):
             a = FixedVariable.from_const(a, hwconf=self.hwconf, _factor=1)
         if not isinstance(b, FixedVariable):
             b = FixedVariable.from_const(b, hwconf=self.hwconf, _factor=1)
         if self._factor < 0:
-            return (-self).msb_mux(b, a, qint)
+            if zt_sensitive:
+                return self.msb().msb_mux(a, b, qint)
+            else:
+                return (-self).msb_mux(b, a, qint, zt_sensitive=False)
 
         if self.opr == 'const':
             if self.low >= 0:
-                return b
+                return b if self.high == 0 else a
             else:
                 return b if log2(abs(self.low)) % 1 == 0 else a
-        elif self.opr == 'quantize':
+        if self.opr == 'wrap':
             k, i, _ = self.kif
-            pk, pi, _ = self._from[0].kif
-            if k + i == pk + pi:
-                return self._from[0].msb_mux(a, b, qint=qint)
+            k0, i0, _ = self._from[0].kif
+            _factor = self._factor
+            _factor0 = self._from[0]._factor
+            if k + i == k0 + i0 + log2(abs(_factor / _factor0)):
+                if _factor * _factor0 > 0 or not zt_sensitive:
+                    return self._from[0].msb_mux(a, b, qint=qint, zt_sensitive=zt_sensitive)
 
         if a._factor < 0:
             qint = (-qint[1], -qint[0], qint[2]) if qint else None
-            return -(self.msb_mux(-a, -b, qint=qint))
+            return -(self.msb_mux(-a, -b, qint=qint, zt_sensitive=zt_sensitive))
 
         _factor = a._factor
 
         if qint is None:
-            qint = (min(a.low, b.low), max(a.high, b.high), min(a.step, b.step))
+            qint = (float(min(a.low, b.low)), float(max(a.high, b.high)), float(min(a.step, b.step)))
+        else:
+            _min, _max, _step = qint
+            step = float(min(a.step, b.step))
+            assert _step <= step, (
+                f'MSB mux cannot imply rounding operation, but its {_step} is larger than min(a.step {a.step}, b.step {b.step})'
+            )
+            _min = max(floor(_min / step) * step, float(min(a.low, b.low)))
+            _max = min(floor(_max / step) * step, float(max(a.high, b.high)))
+            qint = (_min, _max, step)
 
         dlat, dcost = cost_add(a.qint, b.qint, 0, False, self.hwconf.adder_size, self.hwconf.carry_size)
+        dcost = dcost / 2
+
+        if a.opr == 'const' and a._factor != b._factor:
+            _factor = b._factor
+            a = a._with(_factor=b._factor, renew_id=True)
+        if b.opr == 'const' and a._factor != b._factor:
+            _factor = a._factor
+            b = b._with(_factor=a._factor, renew_id=True)
+
         return FixedVariable(
             *qint,
             _from=(self, a, b),
@@ -743,16 +858,18 @@ class FixedVariable:
             cost=dcost,
         )
 
-    def is_negative(self) -> 'FixedVariable|bool':
+    def is_negative(self) -> 'FixedVariable':
         if self.low >= 0:
-            return False
+            return self.from_const(0, hwconf=self.hwconf)
         if self.high < 0:
-            return True
-        _, i, _ = self.kif
-        sign_bit = self.quantize(0, i + 1, -i) >> i
-        return sign_bit
+            return self.from_const(1, hwconf=self.hwconf)
+        return self.msb()
 
-    def is_positive(self) -> 'FixedVariable|bool':
+    def msb(self) -> 'FixedVariable':
+        k, i, f = self.kif
+        return self.quantize(0, i + k, -i - k + 1, _force_factor_clear=True) >> i + k - 1
+
+    def is_positive(self) -> 'FixedVariable':
         return (-self).is_negative()
 
     def __abs__(self):
@@ -760,7 +877,7 @@ class FixedVariable:
             return self
         step = self.step
         high = max(-self.low, self.high)
-        return self.msb_mux(-self, self, (Decimal(0), high, step))
+        return self.msb_mux(-self, self, (0, float(high), float(step)), zt_sensitive=False)
 
     def abs(self):
         """Get the absolute value of this variable."""
@@ -774,19 +891,13 @@ class FixedVariable:
         """Get a variable that is 1 if this variable is less than other, else 0."""
         return (other - self).is_positive()
 
-    # def __ge__(self, other: 'FixedVariable|float|Decimal|int'):
-    #     """Get a variable that is 1 if this variable is greater than or equal to other, else 0."""
-    #     r = (other - self).is_negative()
-    #     if isinstance(r, bool):
-    #         return not r
-    #     return ~r
+    def __ge__(self, other: 'FixedVariable|float|Decimal|int'):
+        """Get a variable that is 1 if this variable is greater than or equal to other, else 0."""
+        return ~(self - other).is_negative()
 
-    # def __le__(self, other: 'FixedVariable|float|Decimal|int'):
-    #     """Get a variable that is 1 if this variable is less than or equal to other, else 0."""
-    #     r = (self - other).is_negative()
-    #     if isinstance(r, bool):
-    #         return not r
-    #     return ~r
+    def __le__(self, other: 'FixedVariable|float|Decimal|int'):
+        """Get a variable that is 1 if this variable is less than or equal to other, else 0."""
+        return ~(other - self).is_negative()
 
     def max_of(self, other):
         """Get the maximum of this variable and another variable or constant."""
@@ -804,8 +915,9 @@ class FixedVariable:
         if other.high == other.low == 0:
             return self.relu()
 
-        qint = (max(self.low, other.low), max(self.high, other.high), min(self.step, other.step))
-        return (self - other).msb_mux(other, self, qint=qint)
+        _qint = (max(self.low, other.low), max(self.high, other.high), min(self.step, other.step))
+        qint = (float(_qint[0]), float(_qint[1]), float(_qint[2]))
+        return (self - other).msb_mux(other, self, qint=qint, zt_sensitive=False)
 
     def min_of(self, other):
         """Get the minimum of this variable and another variable or constant."""
@@ -824,10 +936,11 @@ class FixedVariable:
         if other.high == other.low == 0:
             return -(-self).relu()
 
-        qint = (min(self.low, other.low), min(self.high, other.high), min(self.step, other.step))
-        return (self - other).msb_mux(self, other, qint=qint)
+        _qint = (min(self.low, other.low), min(self.high, other.high), min(self.step, other.step))
+        qint = (float(_qint[0]), float(_qint[1]), float(_qint[2]))
+        return (self - other).msb_mux(self, other, qint=qint, zt_sensitive=False)
 
-    def lookup(self, table: LookupTable | np.ndarray) -> 'FixedVariable':
+    def lookup(self, table: LookupTable | np.ndarray, original_qint: tuple[float, float, float] | None = None) -> 'FixedVariable':
         """Use a lookup table to map the variable.
         When the table is a numpy array, the table starts at the lowest possible value of the variable
         When the table is in LookupTable format, the table starts at the normalized lowest value of the variable. (i.e., if the variable has negative _factor, the table is reversed)
@@ -836,22 +949,42 @@ class FixedVariable:
         ----------
         table : LookupTable | np.ndarray
             Lookup table to use
+        original_qint : tuple[float, float, float] | None
+            The original quantization interval of the variable where the original table is applied to. The table will be remapped to fit the variable's quantization interval if provided. If not provided, the table is assumed, and must match the variable's quantization interval.
 
         Returns
         -------
         FixedVariable
         """
-        if isinstance(table, np.ndarray):
+
+        size = len(table)
+
+        was_numpy_table = isinstance(table, np.ndarray)
+        if original_qint is not None:
+            o_min, o_max, o_step = original_qint
+            assert round((o_max - o_min) / o_step) + 1 == size, f'table size {size} does not match original qint {original_qint}'
+            _min, _max, _step = self.qint
+            assert o_step <= _step and o_max >= _max and o_min <= _min, (
+                f'Original quantization interval {original_qint} does not cover all values of the variable {self.qint}.'
+            )
+            _bias_0 = round((_min - o_min) / o_step)
+            _bias_1 = round((o_max - _max) / o_step)
+            stride = round(_step / o_step)
+            s = slice(_bias_0, size - _bias_1, stride)
+            table = table[s]
+            size = len(table)
+
+        assert round((self.high - self.low) / self.step) + 1 == size, (
+            f'Input variable size does not match lookup table size ({round((self.high - self.low) / self.step) + 1} != {size})'
+        )
+
+        if was_numpy_table and isinstance(table, np.ndarray):
             if len(table) == 1:
                 return self.from_const(float(table[0]), hwconf=self.hwconf)
             if self._factor < 0:
                 table = table[::-1]  # Reverse the table for negative factor
 
         _table, table_id = table_context.register_table(table)
-        size = len(table.table) if isinstance(table, LookupTable) else len(table)
-        assert round((self.high - self.low) / self.step) + 1 == size, (
-            f'Input variable size does not match lookup table size ({round((self.high - self.low) / self.step) + 1} != {size})'
-        )
 
         return FixedVariable(
             _table.spec.out_qint.min,
@@ -863,6 +996,106 @@ class FixedVariable:
             hwconf=self.hwconf,
             _data=Decimal(table_id),
         )
+
+    def unary_bit_op(self, _type: str):
+        if self.id == UUID('17e0aa3c-0398-4ca8-aa7e-9d498c778ea6'):
+            pass
+        ops = {
+            'not': 0,
+            'any': 1,
+            'all': 2,
+        }
+        if self.opr == 'const':
+            qint = QInterval(float(self.low), float(self.high), float(self.step))
+            v = _unary_bit_op(float(self.low), ops[_type], qint)
+            return self.from_const(v, hwconf=self.hwconf)
+
+        if sum(self.kif) == 1 and _type in ('any', 'all'):
+            return self.msb()
+
+        _data = Decimal(ops[_type])
+        if _type == 'not':
+            k, i, f = self.kif
+            return FixedVariable.from_kif(
+                k, i, f, hwconf=self.hwconf, opr='bit_unary', _data=_data, _from=(self,), _factor=abs(self._factor)
+            )
+        if _type == 'all':
+            if self.low > 0:
+                return self.from_const(0, hwconf=self.hwconf)
+            if self.high < -self.step:
+                return self.from_const(0, hwconf=self.hwconf)
+            if self.low == 0:
+                _max = log2(self.high + self.step)
+                if _max % 1 != 0:  # max number unreachable for uint
+                    return self.from_const(0, hwconf=self.hwconf)
+        return FixedVariable(0, 1, 1, hwconf=self.hwconf, opr='bit_unary', _data=_data, _from=(self,), _factor=abs(self._factor))
+
+    def binary_bit_op(self, other: 'FixedVariable', _type: str):
+        ops = {
+            'and': 0,
+            'or': 1,
+            'xor': 2,
+        }
+        k, i, f = self.kif
+        k_other, i_other, f_other = other.kif
+        k, i, f = max(k, k_other), max(i, i_other), max(f, f_other)
+        qint = QInterval(-k * 2.0**i, 2.0**i - 2.0**-f, 2.0**-f)
+        if self.opr == 'const' and other.opr == 'const':
+            qint0 = QInterval(float(self.low), float(self.high), float(self.step))
+            qint1 = QInterval(float(other.low), float(other.high), float(other.step))
+            v = _binary_bit_op(float(self.low), float(other.low), ops[_type], qint0, qint1, qint)
+            return self.from_const(v, hwconf=self.hwconf)
+        if self.opr == 'const' and self.low == 0:
+            if _type == 'and':
+                return self
+            if _type == 'or' or _type == 'xor':
+                return other
+        if other.opr == 'const' and other.low == 0:
+            return other.binary_bit_op(self, _type)
+        _data = Decimal(ops[_type])
+        if other.opr == 'const' and other.low == 0:
+            if _type == 'and':
+                return self.from_const(0, hwconf=self.hwconf)
+            if _type == 'or' or _type == 'xor':
+                return self
+        return FixedVariable(
+            *qint, hwconf=self.hwconf, opr='bit_binary', _data=_data, _from=(self, other), _factor=abs(self._factor)
+        )
+
+    def __and__(self, other: 'FixedVariable|float|Decimal|int'):
+        if not isinstance(other, FixedVariable):
+            other = FixedVariable.from_const(other, hwconf=self.hwconf, _factor=abs(self._factor))
+        return self.binary_bit_op(other, 'and')
+
+    def __or__(self, other: 'FixedVariable|float|Decimal|int'):
+        if not isinstance(other, FixedVariable):
+            other = FixedVariable.from_const(other, hwconf=self.hwconf, _factor=abs(self._factor))
+        return self.binary_bit_op(other, 'or')
+
+    def __xor__(self, other: 'FixedVariable|float|Decimal|int'):
+        if not isinstance(other, FixedVariable):
+            other = FixedVariable.from_const(other, hwconf=self.hwconf, _factor=abs(self._factor))
+        return self.binary_bit_op(other, 'xor')
+
+    def __rand__(self, other: 'float|Decimal|int|FixedVariable'):
+        return self.__and__(other)
+
+    def __ror__(self, other: 'float|Decimal|int|FixedVariable'):
+        return self.__or__(other)
+
+    def __rxor__(self, other: 'float|Decimal|int|FixedVariable'):
+        return self.__xor__(other)
+
+    def __invert__(self):
+        return self.unary_bit_op('not')
+
+    def _ne(self, other):
+        if not isinstance(other, FixedVariable):
+            other = FixedVariable.from_const(other, hwconf=self.hwconf, _factor=abs(self._factor))
+        return (self - other).unary_bit_op('any')
+
+    def _eq(self, other):
+        return ~(self._ne(other))
 
 
 class FixedVariableInput(FixedVariable):

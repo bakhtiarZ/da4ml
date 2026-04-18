@@ -21,11 +21,12 @@ def to_da4ml(
     openmp: bool = True,
     n_threads: int = 4,
     metadata=None,
+    inputs_kif: tuple[int, int, int] | None = None,
 ):
-    from da4ml.cmvm.types import CombLogic
-    from da4ml.codegen import RTLModel
+    from da4ml.codegen import HLSModel, RTLModel
     from da4ml.converter import trace_model
     from da4ml.trace import HWConfig, comb_trace
+    from da4ml.types import CombLogic
 
     if model_path.suffix in {'.h5', '.keras'}:
         import hgq  # noqa: F401
@@ -34,7 +35,7 @@ def to_da4ml(
         model: keras.Model = keras.models.load_model(model_path, compile=False)  # type: ignore
         if verbose > 1:
             model.summary()
-        inp, out = trace_model(model, HWConfig(*hwconf), {'hard_dc': hard_dc}, verbose > 1)
+        inp, out = trace_model(model, HWConfig(*hwconf), {'hard_dc': hard_dc}, verbose > 1, inputs_kif=inputs_kif)
         comb = comb_trace(inp, out)
 
     elif model_path.suffix == '.json':
@@ -44,21 +45,35 @@ def to_da4ml(
     else:
         raise ValueError(f'Unsupported model file format: {model_path}')
 
-    rtl_model = RTLModel(
-        comb,
-        'model',
-        path,
-        flavor=flavor,
-        latency_cutoff=latency_cutoff,
-        print_latency=True,
-        clock_uncertainty=unc / 100,
-        clock_period=period,
-        part_name=part_name,
-    )
-    rtl_model.write(metadata)
+    if flavor in ('verilog', 'vhdl'):
+        da_model = RTLModel(
+            comb,
+            'model',
+            path,
+            flavor=flavor,
+            latency_cutoff=latency_cutoff,
+            print_latency=True,
+            clock_uncertainty=unc / 100,
+            clock_period=period,
+            part_name=part_name,
+        )
+    else:
+        da_model = HLSModel(
+            comb,
+            'model',
+            path,
+            flavor=flavor,
+            print_latency=True,
+            clock_uncertainty=unc / 100,
+            clock_period=period,
+            part_name=part_name,
+        )
+
+    da_model.write(metadata)
     if verbose > 1:
-        print(rtl_model)
+        print(da_model)
         print('Model written')
+
     if not n_test_sample:
         return
 
@@ -117,15 +132,19 @@ def to_da4ml(
         print('Verilating...')
     for _ in range(3):
         try:
-            rtl_model._compile(nproc=n_threads, openmp=openmp)
+            da_model._compile(openmp=openmp)
             break
         except RuntimeError:
             pass
-    y_da4ml = rtl_model.predict(data_in)
+
+    y_da4ml = da_model.predict(data_in, n_threads=n_threads)
     if not np.all(y_comb == y_da4ml):
         raise RuntimeError(f'[CRITICAL ERROR] RTL validation failed: {np.sum(y_comb != y_da4ml)}/{total} mismatches!')
     if verbose:
-        print(f'[INFO]  RTL validation passed: [0/{total}] mismatches.')
+        if flavor in ('verilog', 'vhdl'):
+            print(f'[INFO]  RTL validation passed: [0/{total}] mismatches.')
+        else:
+            print(f'[INFO] FUNC validation passed: [0/{total}] mismatches.')
 
 
 def convert_main(args):
@@ -153,6 +172,7 @@ def convert_main(args):
         openmp=not args.no_openmp,
         n_threads=args.n_threads,
         metadata=metadata,
+        inputs_kif=args.inputs_kif,
     )
 
 
@@ -162,11 +182,22 @@ def _add_convert_args(parser: argparse.ArgumentParser):
     parser.add_argument('--n-test-sample', '-n', type=int, default=131072, help='Number of test samples for validation')
     parser.add_argument('--clock-period', '-c', type=float, default=5.0, help='Clock period in ns')
     parser.add_argument('--clock-uncertainty', '-unc', type=float, default=10.0, help='Clock uncertainty in percent')
-    parser.add_argument('--flavor', type=str, default='verilog', help='Flavor for DA4ML (verilog/vhdl)')
+    parser.add_argument(
+        '--flavor',
+        type=str,
+        default='verilog',
+        choices=['verilog', 'vhdl', 'vitis', 'hlslib', 'oneapi'],
+        help='Flavor for da4ml model',
+    )
     parser.add_argument('--latency-cutoff', '-lc', type=float, default=5, help='Latency cutoff for pipelining')
     parser.add_argument('--part-name', '-p', type=str, default='xcvu13p-flga2577-2-e', help='FPGA part name')
     parser.add_argument('--verbose', '-v', default=1, type=int, help='Set verbosity level (0: silent, 1: info, 2: debug)')
-    parser.add_argument('--validate-rtl', '-vr', action='store_true', help='Validate RTL by Verilator (and GHDL)')
+    parser.add_argument(
+        '--validate-rtl',
+        '-vr',
+        action='store_true',
+        help='Validate RTL by Verilator (and GHDL). If target is HLS, cc compilation with headers will be done instead.',
+    )
     parser.add_argument('--n-threads', '-j', type=int, default=4, help='Number of threads for compilation and DAIS simulation')
     parser.add_argument('--metadata', '-meta', type=str, default=None, help='Path to metadata JSON file to be included')
     parser.add_argument(
@@ -184,6 +215,14 @@ def _add_convert_args(parser: argparse.ArgumentParser):
         '--no-omp',
         action='store_true',
         help='Disable OpenMP in RTL simulation; no effect if --validate-rtl is not set',
+    )
+    parser.add_argument(
+        '--inputs-kif',
+        '-ikif',
+        type=int,
+        nargs=3,
+        default=None,
+        help='Input precision in KIF format (keep_neg, int bits, frac bits), if known.',
     )
 
 

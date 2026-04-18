@@ -4,7 +4,7 @@ from typing import Callable, Type
 import keras
 
 from hgq.layers import QDense, QSum
-from da4ml.cmvm.types import CombLogic
+from da4ml.cmvm import CombLogic 
 
 from ..hardware_types import QSumLogic
 from .qdense import dense_schedule, input_dense_schedule_requirement, minimum_output_shape_for_dense, minimum_input_shape_for_dense, dense_rebuilder

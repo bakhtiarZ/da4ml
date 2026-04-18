@@ -33,7 +33,7 @@ def main():
     runner = get_runner(sim)
 
     runner.build(
-        verilog_sources=verilog_sources,
+        sources=verilog_sources,
         hdl_toplevel="top_module",
         build_args=[
             "--trace",

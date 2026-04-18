@@ -2,8 +2,9 @@ set project_name "$::env(PROJECT_NAME)"
 set device "$::env(DEVICE)"
 set source_type "$::env(SOURCE_TYPE)"
 
+set prj_root [file normalize [file dirname [info script]]]
 set top_module "${project_name}"
-set output_dir "./output_${project_name}"
+set output_dir "${prj_root}/output_${project_name}"
 
 create_project $project_name "${output_dir}/$project_name" -force -part $device
 
@@ -17,25 +18,25 @@ if { $source_type != "vhdl" && $source_type != "verilog" } {
 if { $source_type == "vhdl" } {
     set_property TARGET_LANGUAGE VHDL [current_project]
 
-    set statis_files [glob -nocomplain "src/static/*.vhd"]
-    set top_file "src/${project_name}.vhd"
-    set stage_files [glob -nocomplain "src/${project_name}_stage*.vhd"]
+    set static_files [glob -nocomplain "${prj_root}/src/static/*.vhd"]
+    set prj_files [glob -nocomplain "${prj_root}/src/*.vhd"]
 
-    read_vhdl -vhdl2008 $top_file $statis_files $stage_files
+    foreach file "${prj_files} ${static_files}" {
+        read_vhdl -vhdl2008 $file
+    }
 
 } else {
     set_property TARGET_LANGUAGE Verilog [current_project]
 
-    set statis_files [glob -nocomplain "src/static/*.v"]
-    set top_file "src/${project_name}.v"
-    set stage_files [glob -nocomplain "src/${project_name}_stage*.v"]
+    set static_files [glob -nocomplain "${prj_root}/src/static/*.v"]
+    set prj_files [glob -nocomplain "${prj_root}/src/*.v"]
 
-    read_verilog $top_file $statis_files $stage_files
+    read_verilog $prj_files $static_files
 
 }
 
 
-set mems [glob -nocomplain "src/memfiles/*.mem"]
+set mems [glob -nocomplain "${prj_root}/src/memfiles/*.mem"]
 
 # VHDL only uses relative path to working dir apparently...
 if { $source_type == "vhdl" } {
@@ -45,15 +46,17 @@ if { $source_type == "vhdl" } {
     set mems [glob -nocomplain "*.mem"]
 }
 
-add_files -fileset [current_fileset] $mems
+if { [llength $mems] > 0 } {
+    add_files -fileset [current_fileset] $mems
+}
 
 foreach f $mems {
     set_property used_in_synthesis true [get_files $f]
 }
 
 # Add XDC constraint if it exists
-if { [file exists "src/${project_name}.xdc"] } {
-    read_xdc "src/${project_name}.xdc" -mode out_of_context
+if { [file exists "${prj_root}/src/${project_name}.xdc"] } {
+    read_xdc "${prj_root}/src/${project_name}.xdc" -mode out_of_context
 }
 
 set_property top $top_module [current_fileset]

@@ -2,14 +2,18 @@
 Distributed Arithmetic for Machine Learning
 ===========================================
 
-.. image:: https://img.shields.io/badge/License-LGPLv3-blue.svg
-   :target: https://www.gnu.org/licenses/lgpl-3.0.en.html
-.. image:: https://github.com/calad0i/da4ml/actions/workflows/sphinx-build.yml/badge.svg
+.. .. image:: https://img.shields.io/badge/License-LGPLv3-blue.svg
+..    :target: https://www.gnu.org/licenses/lgpl-3.0.en.html
+.. image:: https://img.shields.io/github/actions/workflow/status/calad0i/da4ml/unit-test.yml?label=test
+   :target: https://github.com/calad0i/da4ml/actions/workflows/unit-test.yml
+.. image:: https://img.shields.io/github/actions/workflow/status/calad0i/da4ml/sphinx-build.yml?label=doc
    :target: https://calad0i.github.io/da4ml/
-.. image:: https://badge.fury.io/py/da4ml.svg
-   :target: https://badge.fury.io/py/da4ml
+.. image:: https://img.shields.io/pypi/v/da4ml
+   :target: https://pypi.org/project/da4ml/
 .. image:: https://img.shields.io/badge/arXiv-2507.04535-b31b1b.svg
    :target: https://arxiv.org/abs/2507.04535
+.. image:: https://img.shields.io/codecov/c/github/calad0i/da4ml
+   :target: https://codecov.io/gh/calad0i/da4ml
 
 
 .. rst-class:: light
@@ -17,26 +21,57 @@ Distributed Arithmetic for Machine Learning
    :alt: da4ml-overview
    :width: 600
 
+da4ml is a light-weight high-level synthesis (HLS) compiler for generating low-latency, static-dataflow kernels for FPGAs. The main motivation of da4ml is to provide a simple and efficient way for machine learning practitioners requiring ultra-low latency to deploy their models on FPGAs quickly and easily, similar to hls4ml but with a much simpler design and better performance, both for the generated kernels and for the compilation process.
 
-da4ml is a static computation graph to RTL/HLS design compiler targeting ultra-low latency applications on FPGAs. It as two major components:
- - A fast and performant constant-matrix-vector multiplications (CMVM) optimizer to implement them as
-   efficient adder trees. Common sub-expressions elimination (CSE) with graph-based pre-optimization are
-   performed to reduce the firmware footprint and improve the performance.
- - Low-level symbolic tracing frameworks for generating combinational/fully pipelined logics in HDL or HLS
-   code. For fully pipelined networks, da4ml can generate the firmware for the whole network standalone.
-   Alternatively, da4ml be used as a plugin in hls4ml to optimize the CMVM operations in the network.
+As a static dataflow compiler, da4ml is specialized for kernels that are equivalent to a combinational or fully pipelined logic circuit, which means that the kernel has no loops or has only fully unrolled loops. There is no specific limitation on the types of operations that can be used in the kernel. For resource sharing and time-multiplexing, the users are expected to use the generated kernels as building blocks and manually assemble them into a larger design. In the future, we may employ a XLS-like design to automate the communication and buffer instantiation between kernels, but for now we will keep it simple and let the users have full control over the design.
+
+With DA in its name, da4ml do perform distributed arithmetic (DA) optimization to generate efficient kernels for linear DSP operations. The algorithm used is an efficient hybrid algorithm described in our [TRETS'25 paper](https://doi.org/10.1145/3777387). With DA optimization, any linear DSP operation can be implemented efficiently with only adders (i.e., fast accum and LUTs on FPGAs) without any hardened multipliers. If the user wishes, one can also control what multiplication pairs shall be excluded from DA optimization.
 
 
-Key Features
------------
+Installation
+------------
 
-- **Optimized Algorithms**: Comparing to hls4ml's latency strategy, da4ml's CMVM implementation uses no DSO and consumes up to 50% less LUT usage.
-- **Fast code generation**: da4ml can generate HDL for a fully pipelined network in seconds. For the same models, high-level synthesis tools like Vivado/Vitis HLS can take up to days to generate the HDL code.
-- **Low-level symbolic tracing**: As long as the operation can be expressed by a combination of the low-level operations supported, adding new operations is straightforward by "replaying" the operation on the symbolic tensor provided. In most cases, adding support for a new operation/layer takes just a few lines of code in numpy flavor.
-- **Automatic model conversion**: da4ml can automatically convert models trained in `HGQ2 <https://github.com/calad0i/hgq2>`_.
-- **Bit-accurate Simulation**: All operation in da4ml is bit-accurate, meaning the generated HDL code will produce the same output as the original model. da4ml's computation is converted to a RISC-like, instruction set level intermediate representation, distributed arithmetic instruction set (DAIS), which can be easily simulated in multiple ways.
-- **hls4ml integration**: da4ml can be used as a plugin in hls4ml to optimize the CMVM operations in the network by setting `strategy='distributed_arithmetic'` for the strategy of the Dense, EinsumDense, or Conv1/2D layers.
+.. code-block:: bash
 
+   pip install da4ml
+
+Note: da4ml is now released as binary wheels on PyPI for Linux X86_64 and MacOS ARM64 platforms. For other platforms, please install from source. C++20 compliant compiler with OpenMP support is required to build da4ml from source. Windows is not officially supported, but you may try building it with MSVC or MinGW.
+
+Getting Started
+---------------
+
+- See the `Getting Started <https://calad0i.github.io/da4ml/getting_started.html>`_ guide for a quick introduction to using da4ml.
+- See `JEDI-linear <https://github.com/calad0i/JEDI-linear>`_ project which is based on da4ml
+
+
+
+Index
+=================
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Contents:
+
+   status.md
+   install.md
+   getting_started.md
+   dais.md
+   cmvm.md
+   plugin.md
+   faq.md
+
+.. toctree::
+   :maxdepth: 3
+   :caption: API Reference:
+
+   autodoc/da4ml
+
+Indices and tables
+==================
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`
 
 Citation
 ==================
@@ -57,33 +92,3 @@ If you use da4ml in a publication, please cite our `TRETS'25 paper <https://doi.
       journal = {ACM Trans. Reconfigurable Technol. Syst.},
       month = nov,
    }
-
-Index
-=================
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Contents:
-
-   status.md
-   install.md
-   getting_started.md
-   dais.md
-   cmvm.md
-   faq.md
-
-.. toctree::
-   :maxdepth: 3
-   :caption: API Reference:
-
-   autodoc/da4ml.cmvm
-   autodoc/da4ml.trace
-   autodoc/da4ml.codegen
-   autodoc/da4ml.converter
-
-Indices and tables
-==================
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`

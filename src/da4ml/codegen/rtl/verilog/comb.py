@@ -4,17 +4,15 @@ from uuid import UUID
 
 import numpy as np
 
-from ....cmvm.types import CombLogic, Op, QInterval, _minimal_kif
+from ....types import CombLogic, Op, QInterval, minimal_kif
 
 
 def make_neg(lines: list[str], idx: int, qint: QInterval, v0_name: str, neg_repo: dict[int, tuple[int, str]]):
-    if idx == 21568:
-        pass
     if idx in neg_repo:
         return neg_repo[idx]
     _min, _max, step = qint
-    bw0 = sum(_minimal_kif(qint))
-    bw_neg = sum(_minimal_kif(QInterval(-_max, -_min, step)))
+    bw0 = sum(minimal_kif(qint))
+    bw_neg = sum(minimal_kif(QInterval(-_max, -_min, step)))
     was_signed = int(_min < 0)
     lines.append(
         f'wire [{bw_neg - 1}:0] v{idx}_neg; negative #({bw0}, {bw_neg}, {was_signed}) op_neg_{idx} ({v0_name}, v{idx}_neg);'
@@ -25,30 +23,36 @@ def make_neg(lines: list[str], idx: int, qint: QInterval, v0_name: str, neg_repo
     return bw0, v0_name
 
 
-def gen_mem_file(sol: CombLogic, op: Op) -> str:
+def gen_memfile(sol: CombLogic, op: Op) -> str:
     assert op.opcode == 8
     assert sol.lookup_tables is not None
     table = sol.lookup_tables[op.data]
     width = sum(table.spec.out_kif)
     ndigits = ceil(width / 4)
     data = table.padded_table(sol.ops[op.id0].qint)
-    mem_lines = [f'{hex(value)[2:].upper().zfill(ndigits)}' for value in data & ((1 << width) - 1)]
+    mem_lines = []
+    for v in data:
+        if np.isnan(v):
+            line = 'X' * ndigits
+        else:
+            line = f'{hex(int(v) & ((1 << width) - 1))[2:].upper().zfill(ndigits)}'
+        mem_lines.append(line)
     return '\n'.join(mem_lines)
 
 
-def get_table_name(sol: CombLogic, op: Op) -> str:
-    memfile = gen_mem_file(sol, op)
+def get_table_name_memfile(sol: CombLogic, op: Op) -> tuple[str, str]:
+    memfile = gen_memfile(sol, op)
     hash_obj = sha256(memfile.encode('utf-8'))
     _int = int(hash_obj.hexdigest()[:32], 16)
     uuid = UUID(int=_int, version=4)
-    return f'table_{str(uuid)}.mem'
+    return f'table_{str(uuid)}.mem', memfile
 
 
 def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency: bool = False) -> list[str]:
     ops = sol.ops
-    kifs = list(map(_minimal_kif, (op.qint for op in ops)))
+    kifs = list(map(minimal_kif, (op.qint for op in ops)))
     widths: list[int] = list(map(sum, kifs))
-    inp_kifs = [_minimal_kif(qint) for qint in sol.inp_qint]
+    inp_kifs = [minimal_kif(qint) for qint in sol.inp_qint]
     inp_widths = list(map(sum, inp_kifs))
     _inp_widths = np.cumsum([0] + inp_widths)
     inp_idxs = np.stack([_inp_widths[1:] - 1, _inp_widths[:-1]], axis=1)
@@ -142,9 +146,13 @@ def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency:
                 inv = '1' if op.opcode == -6 else '0'
                 bwk, bw0, bw1 = widths[k], widths[a], widths[b]
                 s0, f0, s1, f1 = int(p0[0]), p0[2], int(p1[0]), p1[2]
+                fo = kifs[i][2]
                 _shift = (op.data >> 32) & 0xFFFFFFFF
                 _shift = _shift if _shift < 0x80000000 else _shift - 0x100000000
-                shift = f0 - f1 + _shift
+                shift1 = fo - f1 + _shift
+                shift0 = fo - f0
+                assert shift0 == 0 or shift1 == 0, f'{i}, {op}, shift0={shift0}, shift1={shift1}'
+                shift = shift1 * (shift1 > 0) - shift0 * (shift0 > 0)
                 vk, v0, v1 = f'v{k}[{bwk - 1}]', f'v{a}[{bw0 - 1}:0]', f'v{b}[{bw1 - 1}:0]'
                 if bw0 == 0:
                     v0, bw0 = "1'b0", 1
@@ -161,10 +169,48 @@ def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency:
                 line = f'{_def} multiplier #({bw0}, {bw1}, {s0}, {s1}, {bw}) op_{i} ({v0}, {v1}, {v});'
 
             case 8:  # Lookup Table
-                name = get_table_name(sol, op)
+                name = get_table_name_memfile(sol, op)[0]
                 bw0 = widths[op.id0]
 
                 line = f'{_def} lookup_table #({bw0}, {bw}, "{name}") op_{i} (v{op.id0}, {v});'
+
+            case 9 | -9:  # Bitwise Unary
+                if op.opcode == -9 and op.data != 1:
+                    _, v0_name = make_neg(lines, op.id0, ops[op.id0].qint, f'v{op.id0}', neg_repo)
+                else:
+                    v0_name = f'v{op.id0}'
+                match op.data:
+                    case 0:  # NOT
+                        line = f'{_def} assign {v} = ~{v0_name};'
+                    case 1:  # OR with self (reduction)
+                        line = f'{_def} assign {v} = |{v0_name};'
+                    case 2:  # AND with self (reduction)
+                        line = f'{_def} assign {v} = &{v0_name};'
+                    case _:
+                        raise ValueError(f'Unknown bitwise operation {op.data} for operation {i} ({op})')
+
+            case 10:  # Bitwise Binary
+                # data: {subopcode[63:56], pad0, v1_neg[33], v0_neg[32], shift[31:0]}
+                data = op.data
+                subop, _shift = (data >> 56) & 0xFF, data & 0xFFFFFFFF
+                shift = (_shift + 0x80000000) % 0x100000000 - 0x80000000 + kifs[op.id0][2] - kifs[op.id1][2]
+                v0_neg, v1_neg = (data >> 32) & 1, (data >> 33) & 1
+                if v0_neg:
+                    bw0, v0_name = make_neg(lines, op.id0, ops[op.id0].qint, f'v{op.id0}', neg_repo)
+                    s0 = ops[op.id0].qint.max > 0
+                else:
+                    bw0, v0_name = widths[op.id0], f'v{op.id0}'
+                    s0 = ops[op.id0].qint.min < 0
+                if v1_neg:
+                    bw1, v1_name = make_neg(lines, op.id1, ops[op.id1].qint, f'v{op.id1}', neg_repo)
+                    s1 = ops[op.id1].qint.max > 0
+                else:
+                    bw1, v1_name = widths[op.id1], f'v{op.id1}'
+                    s1 = ops[op.id1].qint.min < 0
+
+                s0, s1 = int(s0), int(s1)
+
+                line = f'{_def} binop #({bw0}, {bw1}, {s0}, {s1}, {bw}, {shift}, {subop}) op_{i} ({v0_name}, {v1_name}, {v});'
 
             case _:
                 raise ValueError(f'Unknown opcode {op.opcode} for operation {i} ({op})')
@@ -177,7 +223,7 @@ def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency:
 
 def output_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]]) -> list[str]:
     lines = []
-    widths = list(map(sum, map(_minimal_kif, sol.out_qint)))
+    widths = list(map(sum, map(minimal_kif, sol.out_qint)))
     _widths = np.cumsum([0] + widths)
     out_idxs = np.stack([_widths[1:] - 1, _widths[:-1]], axis=1)
     for i, idx in enumerate(sol.out_idxs):
@@ -197,8 +243,8 @@ def output_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]]) -> list[str
 
 
 def comb_logic_gen(sol: CombLogic, fn_name: str, print_latency: bool = False, timescale: str | None = None):
-    inp_bits = sum(map(sum, map(_minimal_kif, sol.inp_qint)))
-    out_bits = sum(map(sum, map(_minimal_kif, sol.out_qint)))
+    inp_bits = sum(map(sum, map(minimal_kif, sol.inp_qint)))
+    out_bits = sum(map(sum, map(minimal_kif, sol.out_qint)))
 
     fn_signature = [
         f'module {fn_name} (',
@@ -225,7 +271,7 @@ def comb_logic_gen(sol: CombLogic, fn_name: str, print_latency: bool = False, ti
 
     {body_indent.join(output_lines)}
 
-    endmodule
+endmodule
 """
     if timescale is not None:
         code = f'{timescale}\n\n{code}'
@@ -235,5 +281,10 @@ def comb_logic_gen(sol: CombLogic, fn_name: str, print_latency: bool = False, ti
 def table_mem_gen(sol: CombLogic) -> dict[str, str]:
     if not sol.lookup_tables:
         return {}
-    mem_files = {get_table_name(sol, op): gen_mem_file(sol, op) for op in sol.ops if op.opcode == 8}
+    mem_files = {}
+    for op in sol.ops:
+        if not op.opcode == 8:
+            continue
+        name, memfile = get_table_name_memfile(sol, op)
+        mem_files[name] = memfile
     return mem_files

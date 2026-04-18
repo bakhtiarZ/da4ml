@@ -5,7 +5,8 @@ import keras
 import numpy as np
 
 from da4ml.codegen.rtl.rtl_model import get_io_kifs
-from da4ml.cmvm.types import CombLogic
+from da4ml.cmvm import CombLogic 
+
 
 @dataclass
 class OpRepr:
@@ -14,6 +15,15 @@ class OpRepr:
     kwargs: dict
     produces: Tuple[keras.KerasTensor, ...]
     requires: Tuple[keras.KerasTensor, ...]
+
+
+def homogeneous(kif):
+        return np.all(kif == kif[:, :1, :])        
+
+def convert_kif_to_streaming_shape(kif, n):
+    assert homogeneous(kif), f"KIF is not homogeneous: \n{kif}\n"
+    return kif[:, :n, :].copy()
+
 
 
 def _strip_batch(shape: Any) -> tuple[int, ...]:

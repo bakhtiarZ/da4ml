@@ -2,8 +2,8 @@ from math import ceil, log2
 
 import numpy as np
 
-from ....cmvm.types import CombLogic, QInterval, _minimal_kif
-from ..verilog.comb import get_table_name
+from ....types import CombLogic, QInterval, minimal_kif
+from ..verilog.comb import get_table_name_memfile
 
 
 def make_neg(
@@ -18,8 +18,8 @@ def make_neg(
         return neg_repo[idx]
     _min, _max, step = qint
     was_signed = int(_min < 0)
-    bw0 = sum(_minimal_kif(qint))
-    bw_neg = sum(_minimal_kif(QInterval(-_max, -_min, step)))
+    bw0 = sum(minimal_kif(qint))
+    bw_neg = sum(minimal_kif(QInterval(-_max, -_min, step)))
     signals.append(f'signal v{idx}_neg : std_logic_vector({bw_neg - 1} downto {0});')
     assigns.append(
         f'op_neg_{idx} : entity work.negative generic map (BW_IN => {bw0}, BW_OUT => {bw_neg}, IN_SIGNED => {was_signed}) port map (neg_in => {v0_name}, neg_out => v{idx}_neg);'
@@ -32,9 +32,9 @@ def make_neg(
 
 def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency: bool = False):
     ops = sol.ops
-    kifs = list(map(_minimal_kif, (op.qint for op in ops)))
+    kifs = list(map(minimal_kif, (op.qint for op in ops)))
     widths = list(map(sum, kifs))
-    inp_kifs = [_minimal_kif(qint) for qint in sol.inp_qint]
+    inp_kifs = [minimal_kif(qint) for qint in sol.inp_qint]
     inp_widths = list(map(sum, inp_kifs))
     _inp_widths = np.cumsum([0] + inp_widths)
     inp_idxs = np.stack([_inp_widths[1:] - 1, _inp_widths[:-1]], axis=1)
@@ -124,9 +124,13 @@ def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency:
                 inv = '1' if op.opcode == -6 else '0'
                 bwk, bw0, bw1 = widths[k], widths[a], widths[b]
                 s0, f0, s1, f1 = int(p0[0]), p0[2], int(p1[0]), p1[2]
+                fo = kifs[i][2]
                 _shift = (op.data >> 32) & 0xFFFFFFFF
                 _shift = _shift if _shift < 0x80000000 else _shift - 0x100000000
-                shift = f0 - f1 + _shift
+                shift1 = fo - f1 + _shift
+                shift0 = fo - f0
+                assert shift0 == 0 or shift1 == 0, f'{i}, {op}, shift0={shift0}, shift1={shift1}'
+                shift = shift1 * (shift1 > 0) - shift0 * (shift0 > 0)
                 v0, v1 = f'v{a}', f'v{b}'
                 if bw0 == 0:
                     v0, bw0 = 'B"0"', 1
@@ -140,10 +144,47 @@ def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency:
                 line = f'op_{i}:entity work.multiplier generic map(BW_INPUT0=>{bw0},BW_INPUT1=>{bw1},SIGNED0=>{s0},SIGNED1=>{s1},BW_OUT=>{bw}) port map(in0=>v{op.id0},in1=>v{op.id1},result=>v{i});'
 
             case 8:  # Lookup Table
-                name = get_table_name(sol, op)
+                name = get_table_name_memfile(sol, op)[0]
                 bw0 = widths[op.id0]
                 line = f'op_{i}:entity work.lookup_table generic map(BW_IN=>{bw0},BW_OUT=>{bw},MEM_FILE=>"{name}") port map(inp=>v{op.id0},outp=>v{i});'
 
+            case 9 | -9:  # Bitwise unary ops
+                bw0 = widths[op.id0]
+                if op.opcode == -9 and op.data != 1:
+                    bw0, v0_name = make_neg(signals, assigns, op.id0, ops[op.id0].qint, f'v{op.id0}', neg_repo)
+                else:
+                    v0_name = f'v{op.id0}'
+                match op.data:
+                    case 0:  # NOT
+                        line = f'v{i} <= not {v0_name};'
+                    case 1:  # ANY
+                        line = f'v{i}(0) <= or_reduce({v0_name});'
+                    case 2:  # ALL
+                        line = f'v{i}(0) <= and_reduce({v0_name});'
+                    case _:
+                        raise ValueError(f'Unknown unary bitwise op {op.data} for operation {i} ({op})')
+            case 10:  # Bitwise Binary
+                # data: {subopcode[63:56], pad0, v1_neg[33], v0_neg[32], shift[31:0]}
+                data = op.data
+                subop, _shift = (data >> 56) & 0xFF, data & 0xFFFFFFFF
+                shift = (_shift + 0x80000000) % 0x100000000 - 0x80000000 + kifs[op.id0][2] - kifs[op.id1][2]
+                v0_neg, v1_neg = (data >> 32) & 1, (data >> 33) & 1
+                if v0_neg:
+                    bw0, v0_name = make_neg(signals, assigns, op.id0, ops[op.id0].qint, f'v{op.id0}', neg_repo)
+                    s0 = ops[op.id0].qint.max > 0
+                else:
+                    bw0, v0_name = widths[op.id0], f'v{op.id0}'
+                    s0 = ops[op.id0].qint.min < 0
+                if v1_neg:
+                    bw1, v1_name = make_neg(signals, assigns, op.id1, ops[op.id1].qint, f'v{op.id1}', neg_repo)
+                    s1 = ops[op.id1].qint.max > 0
+                else:
+                    bw1, v1_name = widths[op.id1], f'v{op.id1}'
+                    s1 = ops[op.id1].qint.min < 0
+
+                s0, s1 = int(s0), int(s1)
+
+                line = f'op_{i}:entity work.binop generic map(BW_INPUT0=>{bw0},BW_INPUT1=>{bw1},SIGNED0=>{s0},SIGNED1=>{s1},BW_OUT=>{bw},SHIFT1=>{shift},SUBOP=>{subop}) port map(in0=>{v0_name},in1=>{v1_name},result=>v{i});'
             case _:
                 raise ValueError(f'Unknown opcode {op.opcode} for operation {i} ({op})')
 
@@ -156,7 +197,7 @@ def ssa_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]], print_latency:
 def output_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]]):
     assigns = []
     signals = []
-    widths = list(map(sum, map(_minimal_kif, sol.out_qint)))
+    widths = list(map(sum, map(minimal_kif, sol.out_qint)))
     _widths = np.cumsum([0] + widths)
     out_idxs = np.stack([_widths[1:] - 1, _widths[:-1]], axis=1)
     for i, idx in enumerate(sol.out_idxs):
@@ -175,17 +216,24 @@ def output_gen(sol: CombLogic, neg_repo: dict[int, tuple[int, str]]):
 
 
 def comb_logic_gen(sol: CombLogic, fn_name: str, print_latency: bool = False, timescale: str | None = None):
-    inp_bits = sum(map(sum, map(_minimal_kif, sol.inp_qint)))
-    out_bits = sum(map(sum, map(_minimal_kif, sol.out_qint)))
+    inp_bits = sum(map(sum, map(minimal_kif, sol.inp_qint)))
+    out_bits = sum(map(sum, map(minimal_kif, sol.out_qint)))
 
     neg_repo: dict[int, tuple[int, str]] = {}
     ssa_signals, ssa_assigns = ssa_gen(sol, neg_repo=neg_repo, print_latency=print_latency)
     output_signals, output_assigns = output_gen(sol, neg_repo)
     blk = '\n    '
 
+    extra_lib = ''
+    if any(abs(op.opcode) == 9 and op.data == 1 for op in sol.ops):
+        extra_lib += 'use ieee.std_logic_misc.or_reduce;\n'
+    if any(abs(op.opcode) == 9 and op.data == 2 for op in sol.ops):
+        extra_lib += 'use ieee.std_logic_misc.and_reduce;\n'
+
     code = f"""library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+{extra_lib}
 
 entity {fn_name} is port(
     model_inp:in std_logic_vector({inp_bits - 1} downto {0});

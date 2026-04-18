@@ -1,12 +1,11 @@
 from collections.abc import Sequence
 from decimal import Decimal
-from itertools import chain
 from math import log2
 from uuid import UUID
 
 import numpy as np
 
-from ..cmvm.types import CombLogic, Op, QInterval
+from ..types import CombLogic, Op, QInterval
 from .fixed_variable import FixedVariable, _const_f, table_context
 
 
@@ -20,6 +19,7 @@ def _recursive_gather(v: FixedVariable, gathered: dict[UUID, FixedVariable]):
 
 
 def gather_variables(inputs: Sequence[FixedVariable], outputs: Sequence[FixedVariable]):
+    input_ids = {v.id for v in inputs}
     gathered = {v.id: v for v in inputs}
     for o in outputs:
         _recursive_gather(o, gathered)
@@ -32,14 +32,14 @@ def gather_variables(inputs: Sequence[FixedVariable], outputs: Sequence[FixedVar
     # Remove variables with 0 refcount
     refcount = {v.id: 0 for v in variables}
     for v in variables:
-        if v in inputs:
+        if v.id in input_ids:
             continue
         for _v in v._from:
             refcount[_v.id] += 1
     for v in outputs:
         refcount[v.id] += 1
 
-    variables = [v for v in variables if refcount[v.id] > 0]
+    variables = [v for v in variables if refcount[v.id] > 0 or v.id in input_ids]
     index = {variables[i].id: i for i in range(len(variables))}
 
     return variables, index
@@ -132,6 +132,23 @@ def _comb_trace(inputs: Sequence[FixedVariable], outputs: Sequence[FixedVariable
                 assert data is not None, 'lookup must have data'
                 assert id0 < i, f'{id0} {i} {v.id}'
                 op = Op(id0, -1, opcode, table_map[int(data)], v.unscaled.qint, v.latency, v.cost)
+            case 'bit_unary':
+                v0 = v._from[0]
+                id0 = index[v0.id]
+                assert id0 < i, f'{id0} {i} {v.id}'
+                assert v._data is not None, 'bit_unary must have data'
+                opcode = 9 if v._factor > 0 else -9
+                op = Op(id0, -1, opcode, int(v._data), v.unscaled.qint, v.latency, v.cost)
+            case 'bit_binary':
+                id0, id1 = index[v._from[0].id], index[v._from[1].id]
+                assert id0 < i and id1 < i, f'{id0} {id1} {i} {v.id}'
+                assert v._data is not None, 'bit_binary must have data'
+                v0, v1 = v._from
+                f0, f1 = v0._factor, v1._factor
+                # data: {subopcode[63:56], pad0, v1_neg[33], v0_neg[32], shift[31:0]}
+                _data = int(log2(abs(f1 / f0))) & 0xFFFFFFFF
+                _data += (int(v._data) << 56) + (int(f0 < 0) << 32) + (int(f1 < 0) << 33)
+                op = Op(id0, id1, 10, _data, v.unscaled.qint, v.latency, v.cost)
             case _:
                 raise NotImplementedError(f'Operation "{v.opr}" is not supported in tracing')
 
@@ -141,7 +158,60 @@ def _comb_trace(inputs: Sequence[FixedVariable], outputs: Sequence[FixedVariable
     return ops, out_index, lookup_tables
 
 
-def comb_trace(inputs, outputs):
+def _index_remap(op: Op, idx_map: dict[int, int]) -> Op:
+    if op.opcode == -1:
+        return op
+    id0 = op.id0
+    id1 = op.id1
+    id0 = idx_map[id0] if id0 >= 0 else id0
+    id1 = idx_map[id1] if id1 >= 0 else id1
+    if abs(op.opcode) == 6:  # msb_mux
+        id_c = op.data & 0xFFFFFFFF
+        shift = (op.data >> 32) & 0xFFFFFFFF
+        id_c = idx_map[id_c]
+        data = id_c + (shift << 32)
+    else:
+        data = op.data
+    return Op(id0, id1, op.opcode, data, op.qint, op.latency, op.cost)
+
+
+def dead_statement_elimination(comb: CombLogic, keep_dead_inputs=False) -> CombLogic:
+    dead = np.ones(len(comb.ops), dtype=bool)
+    for idx in comb.out_idxs:
+        if idx == -1:
+            continue
+        dead[idx] = False
+
+    for i in range(len(comb.ops) - 1, -1, -1):
+        op = comb.ops[i]
+        if dead[i] and not (keep_dead_inputs and op.opcode == -1):
+            continue
+        if op.id0 >= 0:
+            dead[op.id0] = False
+        if op.id1 >= 0:
+            dead[op.id1] = False
+        if abs(op.opcode) == 6:  # msb_mux
+            id_c = op.data & 0xFFFFFFFF
+            dead[id_c] = False
+
+    new_idxs = np.cumsum(~dead) - 1
+    idx_map = {i: int(new_idxs[i]) for i in range(len(comb.ops))}
+    new_ops = [_index_remap(op, idx_map) for i, op in enumerate(comb.ops) if not dead[i]]
+    new_out_idxs = [idx_map[idx] if idx >= 0 else -1 for idx in comb.out_idxs]
+    return CombLogic(
+        comb.shape,
+        comb.inp_shifts,
+        new_out_idxs,
+        comb.out_shifts,
+        comb.out_negs,
+        new_ops,
+        comb.carry_size,
+        comb.adder_size,
+        comb.lookup_tables,
+    )
+
+
+def comb_trace(inputs, outputs, keep_dead_inputs: bool = False) -> CombLogic:
     if isinstance(inputs, FixedVariable):
         inputs = [inputs]
     if isinstance(outputs, FixedVariable):
@@ -149,13 +219,14 @@ def comb_trace(inputs, outputs):
 
     inputs, outputs = list(np.ravel(inputs)), list(np.ravel(outputs))  # type: ignore
 
+    assert all(inp._factor > 0 for inp in inputs), 'Input variables must have positive scaling factor'
+
     if any(not isinstance(v, FixedVariable) for v in outputs):
         hwconf = inputs[0].hwconf
-        latency = max(v.latency for v in chain(inputs, outputs) if isinstance(v, FixedVariable))
         outputs = list(outputs)
         for i, v in enumerate(outputs):
             if not isinstance(v, FixedVariable):
-                outputs[i] = FixedVariable.from_const(v, hwconf, latency, 1)
+                outputs[i] = FixedVariable.from_const(v, hwconf, 1)
 
     ops, out_index, lookup_tables = _comb_trace(inputs, outputs)
     shape = len(inputs), len(outputs)
@@ -164,7 +235,7 @@ def comb_trace(inputs, outputs):
     out_shift = [int(log2(abs(sf))) for sf in out_sf]
     out_neg = [sf < 0 for sf in out_sf]
 
-    sol = CombLogic(
+    comb = CombLogic(
         shape,
         inp_shifts,
         out_index,
@@ -176,11 +247,4 @@ def comb_trace(inputs, outputs):
         lookup_tables,
     )
 
-    ref_count = sol.ref_count
-
-    for i in range(len(ops)):
-        if ref_count[i] == 0:
-            op = ops[i]
-            sol.ops[i] = Op(-1, -1, 5, 0, QInterval(0, 0, 1), op[5], 0.0)
-
-    return sol
+    return dead_statement_elimination(comb, keep_dead_inputs)

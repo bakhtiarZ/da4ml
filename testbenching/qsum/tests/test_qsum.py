@@ -9,12 +9,13 @@ import numpy as np
 import tensorflow as tf
 from da4ml_test_utils.graph_ir.test_lrgraph import Source, m_testing_parallelism, two_layer_model, encode_to_d, encode_to
 from da4ml.graph_ir.hardware_types import HWInterface
+from da4ml.graph_ir.util import homogeneous
 from da4ml.graph_ir.lr_graph import LRGraph, build_lr_graph_from_model, lr_to_dot, configure_custom_logic_nodes, get_top_level_interface
 from da4ml.codegen.rtl.rtl_model import get_io_kifs
 from hgq.layers import QDense
 from hgq.config import QuantizerConfig
 
-from qsum_definitions import config, m_with_qsum, simple_qsum, generate_qsum_hw, m_with_qsum_fixed_q_conf
+from qsum_definitions import config, m_with_qsum, simple_qsum, generate_qsum_hw, m_with_qsum_fixed_q_conf, qsum_to_dense
 
 
 # ============================================================
@@ -85,7 +86,7 @@ class TestTopSimpleTB:
         
         self.output_bitwidth_unpacked = self.out_hwi.output_bitwidth
         self.output_item_size = self.out_hwi.output_item_size
-        self.output_kif = self.out_hwi.output_kif        
+        self.output_kif = self.out_hwi.output_kif  
         self.output_bitwidth_packed = self.output_bitwidth_unpacked * self.output_item_size
 
 
@@ -106,12 +107,20 @@ class TestTopSimpleTB:
         reshaped_list = reshaped.numpy().tolist()
         streamed_inputs = []
         total_bits = sum(np.max(arr) for arr in kifs)
-        for v in reshaped_list:
+        kif_rows = kifs.shape[1] if len(kifs.shape) > 2 else 1
+        kif_is_homogeneous = len(kifs.shape) <= 2 or homogeneous(kifs)
+        for row_idx, v in enumerate(reshaped_list):
             hex_vector = []
             for idx, e in enumerate(v):
-                k = kifs[0][idx]
-                i = kifs[1][idx]
-                f = kifs[2][idx]
+                sample_idx = 0 if kif_is_homogeneous else min(row_idx, kif_rows - 1)
+                if len(kifs.shape) > 2:
+                    k = kifs[0][sample_idx][idx]
+                    i = kifs[1][sample_idx][idx]
+                    f = kifs[2][sample_idx][idx]
+                else:
+                    k = kifs[0][idx]
+                    i = kifs[1][idx]
+                    f = kifs[2][idx]
                 streamed_scalar = encode_to_d(
                     np.array([e]),
                     k,
@@ -144,7 +153,11 @@ class TestTopSimpleTB:
         for i, output in enumerate(intermediate_outputs): 
             if i == 0 :
                 continue
-            as_rtl = self.tensor_to_sample_vectors(output, output.shape[-1], self.output_kif)
+            output_node = self.lrg.logic_nodes[i]
+            output_kif = getattr(output_node.logic_impl, "output_kifs", None)
+            if output_kif is None:
+                output_kif = output_node.logic_impl.out_kifs
+            as_rtl = self.tensor_to_sample_vectors(output, output.shape[-1], output_kif)
             # print(f"Intermediate output of layer {i} ({self.model.layers[i].name}): {output.numpy()}")
             print(f"Expected intermediate output of layer {i} ({self.model.layers[i].name}), real {output.numpy()}, as hex: {as_rtl}")
             out.append((output, as_rtl))
@@ -181,9 +194,6 @@ class TestTopSimpleTB:
         word = int(word)
         return [(word >> (i * elem_width)) & mask for i in range(n_elems)]
 
-def get_lrg():
-    model = build_golden_model()
-    return build_lr_graph_from_model(model)
 
 
 # ============================================================
@@ -251,7 +261,7 @@ def extract_T_rows_from_stream(captured_rows: np.ndarray, T: int) -> np.ndarray:
 # The test
 # ============================================================
 
-tb1 = TestTopSimpleTB(model=m_with_qsum_fixed_q_conf())
+tb1 = TestTopSimpleTB(model=qsum_to_dense())
 # tb1 = TestTopSimpleTB(model=m_testing_parallelism())
 @cocotb.test()
 async def print_rtl_vs_keras_final_outputs_m_with_qsum(dut):

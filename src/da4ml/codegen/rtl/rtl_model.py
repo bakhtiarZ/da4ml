@@ -13,20 +13,20 @@ from uuid import uuid4
 import numpy as np
 from numpy.typing import NDArray
 
-from ...cmvm.types import CombLogic, Pipeline, _minimal_kif
 from ...trace.pipeline import to_pipeline
+from ...types import CombLogic, Pipeline, minimal_kif
 from .. import rtl
 
 
 def get_io_kifs(sol: CombLogic | Pipeline):
-    inp_kifs = tuple(zip(*map(_minimal_kif, sol.inp_qint)))
-    out_kifs = tuple(zip(*map(_minimal_kif, sol.out_qint)))
+    inp_kifs = tuple(zip(*map(minimal_kif, sol.inp_qint)))
+    out_kifs = tuple(zip(*map(minimal_kif, sol.out_qint)))
     return np.array(inp_kifs, np.int8), np.array(out_kifs, np.int8)
 
 
 def binder_gen(csol: Pipeline | CombLogic, module_name: str, II: int = 1, latency_multiplier: int = 1):
-    k_in, i_in, f_in = zip(*map(_minimal_kif, csol.inp_qint))
-    k_out, i_out, f_out = zip(*map(_minimal_kif, csol.out_qint))
+    k_in, i_in, f_in = zip(*map(minimal_kif, csol.inp_qint))
+    k_out, i_out, f_out = zip(*map(minimal_kif, csol.out_qint))
     max_inp_bw = max(k_in) + max(i_in) + max(f_in)
     max_out_bw = max(k_out) + max(i_out) + max(f_out)
     if isinstance(csol, CombLogic):
@@ -158,8 +158,8 @@ class RTLModel:
 
                 # Table memory files
                 memfiles: dict[str, str] = {}
-                for comb in self._pipe.solutions:
-                    memfiles.update(table_mem_gen(comb))
+                for _comb in self._pipe.solutions:
+                    memfiles.update(table_mem_gen(_comb))
 
                 for k, v in codes.items():
                     with open(self._path / f'src/{k}.{suffix}', 'w') as f:
@@ -221,18 +221,33 @@ class RTLModel:
         shutil.copy(self.__src_root / 'common_source/build_binder.mk', self._path / 'sim')
         shutil.copy(self.__src_root / 'common_source/ioutil.hh', self._path / 'sim')
         shutil.copy(self.__src_root / 'common_source/binder_util.hh', self._path / 'sim')
-        self._solution.save(self._path / 'model/comb.json')
+        if isinstance(self._solution, CombLogic):
+            self._solution.save(self._path / 'model/comb.json')
+
+        _metadata = {
+            'cost': self._solution.cost,
+            'flavor': self._flavor,
+            'part_name': self._part_name,
+        }
+        _comb = self._solution if isinstance(self._solution, CombLogic) else self._solution.solutions[0]
+        _metadata['adder_size'] = _comb.adder_size
+        _metadata['carry_size'] = _comb.carry_size
+        if self._pipe is not None:
+            _metadata['latency'] = len(self._pipe[0])
+            _metadata['reg_bits'] = self._pipe.reg_bits
+            _metadata['clock_period'] = self._clock_period
+            _metadata['latency_cutoff'] = self._latency_cutoff
+            _metadata['clock_period'] = self._clock_period
+            _metadata['clock_uncertainty'] = self._clock_uncertainty
+            _metadata['io_delay_min'] = self._io_delay_minmax[0]
+            _metadata['io_delay_max'] = self._io_delay_minmax[1]
+
+        if metadata is not None:
+            metadata.update(_metadata)
+            _metadata = metadata
+
         with open(self._path / 'metadata.json', 'w') as f:
-            _metadata = {'cost': self._solution.cost, 'flavor': self._flavor}
-            if self._pipe is not None:
-                _metadata['latency'] = len(self._pipe[0])
-                _metadata['reg_bits'] = self._pipe.reg_bits
-
-            if metadata is not None:
-                metadata.update(_metadata)
-                _metadata = metadata
-
-            f.write(json.dumps(_metadata))
+            json.dump(_metadata, f)
 
     def _compile(self, verbose=False, openmp=True, nproc=None, o3: bool = False, clean=True, _env: dict[str, str] | None = None):
         """Same as compile, but will not write to the library
@@ -363,6 +378,9 @@ class RTLModel:
         -------
         NDArray[np.float64]
             Output of the model in shape (n_samples, output_size).
+        n_threads : int, optional
+            Number of threads to use for inference. If 0, will use all available threads, or the value of
+            the DA_DEFAULT_THREADS environment variable if set. If < 0, OpenMP will be disabled. Default is 0.
         """
 
         if isinstance(data, Sequence):
@@ -388,6 +406,9 @@ class RTLModel:
 
         inp_buf = inp_data.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
         out_buf = out_data.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+
+        if n_threads == 0:
+            n_threads = int(os.environ.get('DA_DEFAULT_THREADS', 0))
 
         with at_path(self._path / 'src/memfiles'):
             self._lib.inference(inp_buf, out_buf, n_sample, n_threads)

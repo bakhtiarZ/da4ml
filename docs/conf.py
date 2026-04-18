@@ -9,14 +9,14 @@
 import os
 import sys
 
-import hgq
+import da4ml
 
 sys.path.insert(0, os.path.abspath('../'))
 
 project = 'da4ml'
 copyright = '2025, Chang Sun'
 author = 'Chang Sun'
-release = str(hgq.__version__)
+release = str(da4ml.__version__)
 version = release
 
 # -- General configuration ---------------------------------------------------
@@ -39,23 +39,29 @@ myst_enable_extensions = [
 
 autosummary_generate = True
 
+autodoc_default_options = {
+    'ignore-module-all': True,
+}
+
 extensions = ['myst_parser', 'sphinx.ext.autodoc', 'sphinx.ext.autosummary', 'sphinx.ext.napoleon', 'sphinx_rtd_theme']
 
-source_suffix = ['.rst', '.md']
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.md': 'markdown',
+}
 
 templates_path = ['_templates']
-exclude_patterns = ['_build']
+exclude_patterns = ['_build', 'autodoc/modules.rst']
 
 html_logo = '_static/icon.svg'
 html_theme_options = {
     'logo_only': True,
-    'display_version': True,
 }
 
 html_context = {
     'display_github': True,  # Integrate GitHub
     'github_user': 'calad0i',  # Username
-    'github_repo': 'HGQ2',  # Repo name
+    'github_repo': 'da4ml',  # Repo name
     'github_version': 'master',  # Version
     'conf_py_path': '/docs/',  # Path in the checkout to the docs root
 }
